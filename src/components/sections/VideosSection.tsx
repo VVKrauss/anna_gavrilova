@@ -689,7 +689,7 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
           </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"> 
           {videos.map((video) => {
             // Для внешних видео используем iframe
             if (video.type === 'external') {
