@@ -62,6 +62,9 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   
+  // Video refs for controlling video elements
+  const videoRefs = useRef<{ [key: string]: HTMLVideoElement }>({});
+  
   // Playback state
   const [currentVideoIndex, setCurrentVideoIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
