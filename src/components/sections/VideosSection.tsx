@@ -82,81 +82,6 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
   // Lazy loading state
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const loadingTimeoutRef = useRef<NodeJS.Timeout>();
-  
-  // Fallback: Load videos by testing pattern
-  const loadVideosByPattern = async (): Promise<Video[]> => {
-    console.log('🔍 Testing video pattern...');
-    const foundVideos: Video[] = [];
-    const extensions = ['mp4', 'mov', 'avi', 'webm'];
-    
-    // Test common patterns
-    const testPatterns = [
-      // Numbered patterns
-      ...Array.from({ length: 20 }, (_, i) => {
-        const num = (i + 1).toString().padStart(2, '0');
-        return extensions.map(ext => `video_${num}.${ext}`);
-      }).flat(),
-      // Simple patterns
-      ...extensions.map(ext => [`video.${ext}`, `test.${ext}`, `demo.${ext}`]).flat(),
-      // Known file (if exists)
-      'video_2025-07-01_20-05-03.mp4'
-    ];
-
-    console.log(`🧪 Testing ${testPatterns.length} patterns...`);
-
-    // Test in batches to avoid overwhelming the server
-    const batchSize = 5;
-    for (let i = 0; i < testPatterns.length; i += batchSize) {
-      const batch = testPatterns.slice(i, i + batchSize);
-      
-      const results = await Promise.allSettled(
-        batch.map(async (fileName) => {
-          const testUrl = `https://uvcywpcikjcdyzyosvhx.supabase.co/storage/v1/object/public/annagavrilova/video/${encodeURIComponent(fileName)}`;
-          
-          try {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 3000);
-            
-            const response = await fetch(testUrl, { 
-              method: 'HEAD',
-              signal: controller.signal
-            });
-            
-            clearTimeout(timeoutId);
-            
-            if (response.ok) {
-              console.log(`✅ Found: ${fileName}`);
-              return {
-                id: `pattern-video-${foundVideos.length}`,
-                url: testUrl,
-                name: fileName.replace(/\.[^/.]+$/, ''),
-                type: 'storage' as const,
-                loaded: true
-              };
-            }
-            return null;
-          } catch (error) {
-            return null;
-          }
-        })
-      );
-      
-      // Add successful results
-      results.forEach((result) => {
-        if (result.status === 'fulfilled' && result.value) {
-          foundVideos.push(result.value);
-        }
-      });
-      
-      // Small delay between batches
-      if (i + batchSize < testPatterns.length) {
-        await new Promise(resolve => setTimeout(resolve, 200));
-      }
-    }
-
-    console.log(`🎯 Pattern search found ${foundVideos.length} videos`);
-    return foundVideos;
-  };
 
   // Initialize videos
   const initializeVideos = useCallback(async () => {
@@ -337,18 +262,29 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
     
     // Pause current video
     const currentVideo = videoRefs.current[videos[currentVideoIndex]?.id];
-    if (currentVideo) {
+    if (currentVideo && !currentVideo.paused) {
       currentVideo.pause();
     }
     
     setCurrentVideoIndex(index);
+    setIsPlaying(false);
     
-    // Play new video
+    // Play new video after a short delay
     setTimeout(() => {
       const newVideo = videoRefs.current[video.id];
       if (newVideo) {
-        newVideo.play();
-        setIsPlaying(true);
+        newVideo.currentTime = 0;
+        const playPromise = newVideo.play();
+        if (playPromise !== undefined) {
+          playPromise
+            .then(() => {
+              setIsPlaying(true);
+            })
+            .catch(error => {
+              console.error('Error playing video:', error);
+              setIsPlaying(false);
+            });
+        }
       }
     }, 100);
   };
@@ -392,9 +328,26 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
       video.pause();
       setIsPlaying(false);
     } else {
-      video.play();
-      setIsPlaying(true);
+      const playPromise = video.play();
+      if (playPromise !== undefined) {
+        playPromise
+          .then(() => {
+            setIsPlaying(true);
+          })
+          .catch(error => {
+            console.error('Error playing video:', error);
+            setIsPlaying(false);
+          });
+      }
     }
+  };
+
+  const toggleMute = () => {
+    const video = videoRefs.current[videos[currentVideoIndex]?.id];
+    if (!video) return;
+    
+    video.muted = !video.muted;
+    setIsMuted(video.muted);
   };
 
   const handleVideoEnd = () => {
@@ -402,7 +355,12 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
       const video = videoRefs.current[videos[currentVideoIndex]?.id];
       if (video) {
         video.currentTime = 0;
-        video.play();
+        const playPromise = video.play();
+        if (playPromise !== undefined) {
+          playPromise.catch(error => {
+            console.error('Error replaying video:', error);
+          });
+        }
       }
     } else if (autoplay) {
       playNext();
@@ -428,6 +386,7 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
   };
 
   const formatTime = (time: number) => {
+    if (!isFinite(time)) return '0:00';
     const minutes = Math.floor(time / 60);
     const seconds = Math.floor(time % 60);
     return `${minutes}:${seconds.toString().padStart(2, '0')}`;
@@ -565,14 +524,20 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
                       <div className="aspect-video rounded-lg overflow-hidden bg-black relative">
                         <video
                           ref={(el) => {
-                            if (el) videoRefs.current[currentVideo.id] = el;
+                            if (el) {
+                              videoRefs.current[currentVideo.id] = el;
+                            }
                           }}
                           src={currentVideo.url}
                           className="w-full h-full object-contain"
                           onTimeUpdate={handleTimeUpdate}
                           onEnded={handleVideoEnd}
                           onLoadedMetadata={handleTimeUpdate}
+                          onPlay={() => setIsPlaying(true)}
+                          onPause={() => setIsPlaying(false)}
                           muted={isMuted}
+                          controls={false}
+                          playsInline
                         />
                         
                         {/* Overlay Controls */}
@@ -585,6 +550,20 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
                               <Pause className="w-8 h-8 text-slate-700" />
                             ) : (
                               <Play className="w-8 h-8 text-slate-700 ml-1" />
+                            )}
+                          </button>
+                        </div>
+
+                        {/* Volume Control */}
+                        <div className="absolute top-4 right-4 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+                          <button
+                            onClick={toggleMute}
+                            className="p-2 bg-black/50 backdrop-blur-sm rounded-full text-white hover:bg-black/70 transition-all"
+                          >
+                            {isMuted ? (
+                              <VolumeX className="w-4 h-4" />
+                            ) : (
+                              <Volume2 className="w-4 h-4" />
                             )}
                           </button>
                         </div>
@@ -685,6 +664,17 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
                         <Repeat className="w-4 h-4" />
                         {repeatMode === 'one' && (
                           <span className="absolute -top-1 -right-1 w-3 h-3 bg-yellow-500 rounded-full text-xs flex items-center justify-center text-white">1</span>
+                        )}
+                      </button>
+
+                      <button
+                        onClick={toggleMute}
+                        className="p-2 bg-white/20 hover:bg-white/30 rounded-full transition-all"
+                      >
+                        {isMuted ? (
+                          <VolumeX className="w-4 h-4 text-slate-600" />
+                        ) : (
+                          <Volume2 className="w-4 h-4 text-slate-600" />
                         )}
                       </button>
                     </div>
@@ -858,12 +848,14 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
                     }`}>
                       <video
                         ref={(el) => {
-                          if (el) videoRefs.current[video.id] = el;
+                          if (el) {
+                            videoRefs.current[video.id] = el;
+                          }
                         }}
                         src={video.url}
                         className="w-full h-full object-contain cursor-pointer"
-                        onLoadedMetadata={() => {
-                          const videoEl = videoRefs.current[video.id];
+                        onLoadedMetadata={(e) => {
+                          const videoEl = e.currentTarget;
                           if (videoEl) {
                             const isVertical = videoEl.videoHeight > videoEl.videoWidth;
                             setVideos(prev => prev.map(v => 
@@ -881,7 +873,7 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
                         }}
                         muted
                         preload="metadata"
-                        crossOrigin="anonymous"
+                        playsInline
                       />
 
                       {/* Play overlay */}
