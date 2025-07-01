@@ -62,9 +62,6 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   
-  // Video refs for managing video elements
-  const videoRefs = useRef<{ [key: string]: HTMLVideoElement }>({});
-  
   // Playback state
   const [currentVideoIndex, setCurrentVideoIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -234,30 +231,52 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
             console.log('📁 No video files found in storage folder');
           }
         } else {
-          console.log('📭 Storage video/ folder is empty');
+          console.log('📭 Storage video/ folder is empty via API');
           
-          // If API doesn't work, try to access the known file directly
-          console.log('🔍 Testing known video file: video_2.mp4');
-          try {
-            const testUrl = 'https://uvcywpcikjcdyzyosvhx.supabase.co/storage/v1/object/public/annagavrilova/video/video_2.mp4';
-            const response = await fetch(testUrl, { method: 'HEAD' });
-            
-            if (response.ok) {
-              console.log('✅ Found video_2.mp4 directly!');
-              const directVideo: Video = {
-                id: 'direct-video-2',
-                url: testUrl,
-                name: 'video_2',
-                type: 'storage',
-                loaded: true
-              };
-              allVideos = [...allVideos, directVideo];
-              console.log('🎯 Added direct video file');
-            } else {
-              console.log('❌ video_2.mp4 not accessible:', response.status);
+          // If API doesn't work, try to check known video files directly
+          console.log('🔍 Testing known video files: video_1.mp4 to video_5.mp4');
+          
+          const knownFiles = [
+            'video_1.mp4',
+            'video_2.mp4', 
+            'video_3.mp4',
+            'video_4.mp4',
+            'video_5.mp4'
+          ];
+          
+          const foundVideos: Video[] = [];
+          
+          for (const fileName of knownFiles) {
+            try {
+              const testUrl = `https://uvcywpcikjcdyzyosvhx.supabase.co/storage/v1/object/public/annagavrilova/video/${fileName}`;
+              const response = await fetch(testUrl, { method: 'HEAD' });
+              
+              if (response.ok) {
+                console.log(`✅ Found ${fileName} directly!`);
+                const directVideo: Video = {
+                  id: `direct-${fileName.replace('.mp4', '')}`,
+                  url: testUrl,
+                  name: fileName.replace('.mp4', ''),
+                  type: 'storage',
+                  loaded: true
+                };
+                foundVideos.push(directVideo);
+              } else {
+                console.log(`❌ ${fileName} not accessible:`, response.status);
+              }
+            } catch (err) {
+              console.log(`❌ Error testing ${fileName}:`, err);
             }
-          } catch (err) {
-            console.log('❌ Error testing direct video:', err);
+            
+            // Small delay between requests
+            await new Promise(resolve => setTimeout(resolve, 100));
+          }
+          
+          if (foundVideos.length > 0) {
+            allVideos = [...allVideos, ...foundVideos];
+            console.log(`🎯 Added ${foundVideos.length} direct video files`);
+          } else {
+            console.log('📁 No known video files found');
           }
         }
       } catch (storageErr) {
