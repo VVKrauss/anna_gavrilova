@@ -80,6 +80,8 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
         
         // 1. Загружаем видео из Supabase Storage
         try {
+          console.log('Fetching videos from storage...');
+          
           const { data: bucketData, error: bucketError } = await supabase
             .storage
             .from('annagavrilova')
@@ -88,23 +90,49 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
               sortBy: { column: 'name', order: 'asc' }
             });
 
-          if (!bucketError && bucketData && bucketData.length > 0) {
-            const videoFiles = bucketData.filter(file => 
-              file.name && /\.(mp4|mov|avi|webm|ogg|mkv)$/i.test(file.name)
-            );
+          console.log('Storage response:', { bucketData, bucketError });
 
-            const storageVideos: Video[] = videoFiles.map((file, index) => ({
-              id: `storage-video-${index}`,
-              url: `https://uvcywpcikjcdyzyosvhx.supabase.co/storage/v1/object/public/annagavrilova/video/${file.name}`,
-              name: file.name.replace(/\.[^/.]+$/, ''),
-              type: 'storage'
-            }));
+          if (bucketError) {
+            console.error('Storage error:', bucketError);
+            throw bucketError;
+          }
+
+          if (bucketData && bucketData.length > 0) {
+            console.log('Raw bucket data:', bucketData);
+            
+            const videoFiles = bucketData.filter(file => {
+              console.log('Checking file:', file);
+              return file.name && 
+                     file.name !== '.emptyFolderPlaceholder' && 
+                     /\.(mp4|mov|avi|webm|ogg|mkv)$/i.test(file.name);
+            });
+
+            console.log('Filtered video files:', videoFiles);
+
+            const storageVideos: Video[] = videoFiles.map((file, index) => {
+              const videoUrl = `https://uvcywpcikjcdyzyosvhx.supabase.co/storage/v1/object/public/annagavrilova/video/${encodeURIComponent(file.name)}`;
+              console.log('Creating video object:', {
+                id: `storage-video-${index}`,
+                url: videoUrl,
+                name: file.name.replace(/\.[^/.]+$/, ''),
+                originalFileName: file.name
+              });
+              
+              return {
+                id: `storage-video-${index}`,
+                url: videoUrl,
+                name: file.name.replace(/\.[^/.]+$/, ''),
+                type: 'storage'
+              };
+            });
 
             allVideos = [...allVideos, ...storageVideos];
-            console.log('Found storage videos:', storageVideos);
+            console.log('Created storage videos:', storageVideos);
+          } else {
+            console.log('No files found in storage bucket');
           }
         } catch (storageErr) {
-          console.warn('Could not load storage videos:', storageErr);
+          console.error('Storage error details:', storageErr);
         }
 
         // 2. Добавляем видео из базы данных (встроенные и внешние)
@@ -128,6 +156,19 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
 
           allVideos = [...allVideos, ...databaseVideos];
           console.log('Found database videos:', databaseVideos);
+        }
+
+        // 3. Тестовое видео для отладки (добавляем конкретный файл)
+        if (allVideos.length === 0) {
+          console.log('No videos found, adding test video');
+          const testVideo: Video = {
+            id: 'test-video-1',
+            url: 'https://uvcywpcikjcdyzyosvhx.supabase.co/storage/v1/object/public/annagavrilova/video/video_2025-07-01_20-05-03.mp4',
+            name: 'Тестовое видео',
+            type: 'storage'
+          };
+          allVideos = [testVideo];
+          console.log('Added test video:', testVideo);
         }
 
         console.log('All videos combined:', allVideos);
@@ -293,12 +334,28 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
               }}
               src={video.url}
               className="w-full h-full object-contain cursor-pointer"
-              onLoadedMetadata={() => handleLoadedMetadata(video.id)}
+              onLoadedMetadata={() => {
+                console.log(`Video metadata loaded for ${video.id}:`, video.url);
+                handleLoadedMetadata(video.id);
+              }}
               onTimeUpdate={() => handleTimeUpdate(video.id)}
               onEnded={() => handleVideoEnd(video.id)}
               onClick={() => togglePlay(video.id)}
+              onError={(e) => {
+                console.error(`Video error for ${video.id}:`, e);
+                console.error('Video URL:', video.url);
+                const target = e.target as HTMLVideoElement;
+                console.error('Video error details:', {
+                  error: target.error,
+                  networkState: target.networkState,
+                  readyState: target.readyState
+                });
+              }}
+              onLoadStart={() => console.log(`Video load start for ${video.id}`)}
+              onCanPlay={() => console.log(`Video can play for ${video.id}`)}
               muted={isMuted[video.id] || false}
               preload="metadata"
+              crossOrigin="anonymous"
             />
 
             {/* Play/Pause Overlay */}
