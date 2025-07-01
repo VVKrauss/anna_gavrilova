@@ -1,34 +1,4 @@
-// 1. Загружаем видео из Supabase Storage
-        try {
-          console.log('Fetching videos from storage...');
-          
-          // Пробуем получить содержимое папки video
-          const { data: bucketData, error: bucketError } = await supabase
-            .storage
-            .from('annagavrilova')
-            .list('video', {
-              limit: 100,
-              sortBy: { column: 'name', order: 'asc' }
-            });
-
-          console.log('Storage API response:', { 
-            success: !bucketError, 
-            error: bucketError?.message,
-            filesCount: bucketData?.length || 0 
-          });
-
-          let foundStorageVideos = false;
-
-          if (!bucketError && bucketData && bucketData.length > 0) {
-            const videoFiles = bucketData.filter(file => {
-              return file.name && 
-                     file.name !== '.emptyFolderPlaceholder' && 
-                     /\.(mp4|mov|avi|webm|ogg|mkv)$/i.test(file.name);
-            });
-
-            if (videoFiles.length > 0) {
-              const storageVideos: Video[] = videoFiles.map((file, index) => {
-                const videoUrl = `https://uimport React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { GlassCard } from '../GlassCard';
 import { MediaItem } from '../../types';
 import { Play, Pause, Volume2, VolumeX, Maximize, Download, ExternalLink } from 'lucide-react';
@@ -40,8 +10,8 @@ interface Video {
   name: string;
   caption?: string;
   isVertical?: boolean;
-  type: 'storage' | 'embedded' | 'external'; // Добавляем тип видео
-  platform?: string; // Для внешних видео (VK, YouTube, etc.)
+  type: 'storage' | 'embedded' | 'external';
+  platform?: string;
 }
 
 interface VideosSectionProps {
@@ -110,19 +80,9 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
         
         // 1. Загружаем видео из Supabase Storage
         try {
-          console.log('Fetching videos from storage...');
+          console.log('🎥 Fetching videos from storage...');
           
-          // Сначала проверим, какие папки есть в корне bucket
-          const { data: rootData, error: rootError } = await supabase
-            .storage
-            .from('annagavrilova')
-            .list('', {
-              limit: 100
-            });
-          
-          console.log('Root bucket contents:', { rootData, rootError });
-          
-          // Теперь попробуем получить содержимое папки video
+          // Пробуем получить содержимое папки video через API
           const { data: bucketData, error: bucketError } = await supabase
             .storage
             .from('annagavrilova')
@@ -131,31 +91,18 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
               sortBy: { column: 'name', order: 'asc' }
             });
 
-          console.log('Storage response:', { bucketData, bucketError });
-
           let foundStorageVideos = false;
 
           if (!bucketError && bucketData && bucketData.length > 0) {
-            console.log('Raw bucket data:', bucketData);
-            
             const videoFiles = bucketData.filter(file => {
-              console.log('Checking file:', file);
               return file.name && 
                      file.name !== '.emptyFolderPlaceholder' && 
                      /\.(mp4|mov|avi|webm|ogg|mkv)$/i.test(file.name);
             });
 
-            console.log('Filtered video files:', videoFiles);
-
             if (videoFiles.length > 0) {
               const storageVideos: Video[] = videoFiles.map((file, index) => {
                 const videoUrl = `https://uvcywpcikjcdyzyosvhx.supabase.co/storage/v1/object/public/annagavrilova/video/${encodeURIComponent(file.name)}`;
-                console.log('Creating video object:', {
-                  id: `storage-video-${index}`,
-                  url: videoUrl,
-                  name: file.name.replace(/\.[^/.]+$/, ''),
-                  originalFileName: file.name
-                });
                 
                 return {
                   id: `storage-video-${index}`,
@@ -166,116 +113,143 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
               });
 
               allVideos = [...allVideos, ...storageVideos];
-              console.log('Created storage videos:', storageVideos);
+              console.log(`✅ Found ${storageVideos.length} videos via API:`, storageVideos.map(v => v.name));
               foundStorageVideos = true;
             }
           }
 
-                      // Если не удалось получить список файлов через API, попробуем альтернативный подход
+          // Если API не сработал, используем поиск по шаблону video_NN.*
           if (!foundStorageVideos) {
-            console.log('No files found via API, trying alternative approaches...');
+            console.log('🔄 API failed, searching by pattern video_NN.*');
             
-            // Метод 1: Попробуем известные видеофайлы
-            const knownVideoFiles = [
-              'video_2025-07-01_20-05-03.mp4',
-              // Можно добавить другие известные файлы
+            // Генерируем имена файлов по шаблону video_01, video_02, etc.
+            const videoExtensions = ['mp4', 'mov', 'avi', 'webm', 'ogg', 'mkv'];
+            const possibleFiles: string[] = [];
+            
+            // Проверяем video_01 до video_50 (можно изменить диапазон)
+            for (let i = 1; i <= 50; i++) {
+              const numberStr = i.toString().padStart(2, '0'); // 01, 02, 03, ...
+              
+              for (const ext of videoExtensions) {
+                possibleFiles.push(`video_${numberStr}.${ext}`);
+              }
+            }
+
+            // Добавляем также без ведущего нуля (video_1, video_2, etc.)
+            for (let i = 1; i <= 50; i++) {
+              for (const ext of videoExtensions) {
+                possibleFiles.push(`video_${i}.${ext}`);
+              }
+            }
+
+            // Добавляем другие возможные паттерны
+            const additionalPatterns = [
+              'video.mp4', 'video.mov', 'video.avi', 'video.webm',
+              'video_2025-07-01_20-05-03.mp4', // известный файл
             ];
 
-            // Метод 2: Попробуем сгенерировать возможные имена файлов
-            const possibleVideoFiles = [
-              ...knownVideoFiles,
-              // Типичные паттерны названий видео
-              'video.mp4',
-              'video1.mp4',
-              'video2.mp4',
-              'video3.mp4',
-              'sample.mp4',
-              'demo.mp4',
-              'portfolio.mp4',
-              'showreel.mp4',
-              'reel.mp4',
-              // Паттерны с датами
-              'video_2024.mp4',
-              'video_2025.mp4',
-              // Другие возможные расширения
-              'video.mov',
-              'video.webm',
-              'video.avi'
-            ];
-
+            const allFiles = [...possibleFiles, ...additionalPatterns];
             const workingVideos: Video[] = [];
 
-            console.log('Testing possible video files...');
+            console.log(`🔍 Testing ${allFiles.length} files with pattern video_NN.*`);
             
-            // Ограничиваем количество одновременных запросов
+            // Проверяем файлы батчами
             const batchSize = 5;
-            for (let i = 0; i < possibleVideoFiles.length; i += batchSize) {
-              const batch = possibleVideoFiles.slice(i, i + batchSize);
+            let testedCount = 0;
+            
+            for (let i = 0; i < allFiles.length; i += batchSize) {
+              const batch = allFiles.slice(i, i + batchSize);
               
-              await Promise.allSettled(
+              const results = await Promise.allSettled(
                 batch.map(async (fileName) => {
                   const testUrl = `https://uvcywpcikjcdyzyosvhx.supabase.co/storage/v1/object/public/annagavrilova/video/${encodeURIComponent(fileName)}`;
                   
                   try {
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 2000);
+                    
                     const response = await fetch(testUrl, { 
                       method: 'HEAD',
+                      signal: controller.signal,
                       cache: 'no-cache'
                     });
                     
+                    clearTimeout(timeoutId);
+                    
                     if (response.ok) {
-                      console.log(`✅ Found video file: ${fileName}`);
-                      const video: Video = {
-                        id: `manual-video-${workingVideos.length}`,
+                      return {
+                        fileName,
                         url: testUrl,
-                        name: fileName.replace(/\.[^/.]+$/, ''),
-                        type: 'storage'
+                        success: true
                       };
-                      workingVideos.push(video);
-                    } else {
-                      console.log(`❌ File not found: ${fileName} (${response.status})`);
                     }
-                  } catch (fetchError) {
-                    console.log(`❌ Error accessing ${fileName}:`, fetchError.message);
+                    return { fileName, success: false };
+                  } catch (error) {
+                    return { fileName, success: false };
                   }
                 })
               );
               
-              // Небольшая пауза между батчами
-              if (i + batchSize < possibleVideoFiles.length) {
+              // Обрабатываем результаты
+              results.forEach((result) => {
+                testedCount++;
+                if (result.status === 'fulfilled' && result.value.success) {
+                  const video: Video = {
+                    id: `pattern-video-${workingVideos.length}`,
+                    url: result.value.url,
+                    name: result.value.fileName.replace(/\.[^/.]+$/, ''),
+                    type: 'storage'
+                  };
+                  workingVideos.push(video);
+                  console.log(`✅ Found: ${result.value.fileName}`);
+                }
+              });
+              
+              // Показываем прогресс каждые 25 файлов
+              if (testedCount % 25 === 0 || testedCount === allFiles.length) {
+                console.log(`📊 Progress: ${testedCount}/${allFiles.length} tested | Found: ${workingVideos.length} videos`);
+              }
+              
+              // Пауза между батчами
+              if (i + batchSize < allFiles.length) {
                 await new Promise(resolve => setTimeout(resolve, 100));
               }
             }
 
             if (workingVideos.length > 0) {
-              allVideos = [...allVideos, ...workingVideos];
-              console.log(`🎉 Successfully found ${workingVideos.length} video files:`, workingVideos);
-            } else {
-              console.log('❌ No working video files found');
+              // Сортируем найденные видео по имени
+              workingVideos.sort((a, b) => a.name.localeCompare(b.name));
               
-              // Показываем инструкцию
+              allVideos = [...allVideos, ...workingVideos];
+              console.log(`🎉 Found ${workingVideos.length} videos by pattern!`);
+              console.log('📋 Video list:', workingVideos.map(v => v.name));
+            } else {
+              console.log('❌ No videos found with pattern video_NN.*');
               console.log(`
-🎥 КАК ДОБАВИТЬ ВИДЕО:
+🎥 ДОБАВЬТЕ ВИДЕО В STORAGE:
 
-1. ЧЕРЕЗ SUPABASE DASHBOARD:
-   - Откройте https://supabase.com/dashboard
-   - Перейдите в проект annagavrilova
-   - Storage > Buckets > annagavrilova > video/
-   - Загрузите видеофайлы
-   - Убедитесь что bucket публичный
+1. ОТКРОЙТЕ SUPABASE DASHBOARD:
+   - https://supabase.com/dashboard
+   - Проект > Storage > annagavrilova > video/
 
-2. ПРОВЕРЬТЕ НАСТРОЙКИ RLS:
-   - Bucket должен быть public
-   - Или настройте правильные RLS политики
+2. ЗАГРУЗИТЕ ФАЙЛЫ С ИМЕНАМИ:
+   - video_01.mp4
+   - video_02.mp4  
+   - video_03.mp4
+   - и т.д.
 
-3. ДОБАВЬТЕ ФАЙЛЫ В КОД:
-   - Добавьте имена ваших видеофайлов в массив knownVideoFiles
+3. ПОДДЕРЖИВАЕМЫЕ РАСШИРЕНИЯ:
+   - .mp4, .mov, .avi, .webm, .ogg, .mkv
 
-Поддерживаемые форматы: .mp4, .mov, .avi, .webm, .ogg, .mkv
+4. ТЕКУЩИЙ URL ПАТТЕРН:
+   https://uvcywpcikjcdyzyosvhx.supabase.co/storage/v1/object/public/annagavrilova/video/video_01.mp4
+
+Код автоматически найдет файлы video_01 до video_50 с любым поддерживаемым расширением!
               `);
             }
           }
         } catch (storageErr) {
-          console.error('Storage error details:', storageErr);
+          console.error('💥 Storage error:', storageErr);
         }
 
         // 2. Добавляем видео из базы данных (встроенные и внешние)
