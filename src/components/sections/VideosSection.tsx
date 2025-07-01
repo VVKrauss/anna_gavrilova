@@ -185,7 +185,7 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
         console.log('✅ Loaded embedded/external videos:', databaseVideos.length);
       }
 
-      // 2. Load storage videos from Supabase
+      // 2. Load storage videos from Supabase (only if bucket has files)
       try {
         console.log('🔍 Checking storage bucket...');
         
@@ -199,11 +199,7 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
 
         console.log('📦 Storage response:', { bucketData, bucketError });
 
-        if (bucketError) {
-          console.error('❌ Storage error:', bucketError);
-        }
-
-        if (bucketData && bucketData.length > 0) {
+        if (!bucketError && bucketData && bucketData.length > 0) {
           console.log('📂 Found files:', bucketData.map(f => f.name));
           
           const videoFiles = bucketData.filter(file => 
@@ -232,33 +228,13 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
             allVideos = [...allVideos, ...storageVideos];
             console.log('✅ Added storage videos:', storageVideos.length);
           } else {
-            console.log('⚠️ No video files found in storage');
+            console.log('📁 No video files found in storage folder');
           }
         } else {
-          console.log('📭 No files in storage bucket');
-          
-          // Fallback: try to load videos by pattern
-          console.log('🔍 Trying pattern-based loading...');
-          const patternVideos = await loadVideosByPattern();
-          if (patternVideos.length > 0) {
-            allVideos = [...allVideos, ...patternVideos];
-            console.log('✅ Loaded videos by pattern:', patternVideos.length);
-          }
+          console.log('📭 Storage bucket is empty or not accessible');
         }
       } catch (storageErr) {
-        console.error('💥 Storage loading failed:', storageErr);
-        
-        // Fallback: try pattern loading
-        console.log('🔄 Falling back to pattern loading...');
-        try {
-          const patternVideos = await loadVideosByPattern();
-          if (patternVideos.length > 0) {
-            allVideos = [...allVideos, ...patternVideos];
-            console.log('✅ Fallback pattern loading successful:', patternVideos.length);
-          }
-        } catch (patternErr) {
-          console.error('💥 Pattern loading also failed:', patternErr);
-        }
+        console.log('⚠️ Storage loading failed:', storageErr);
       }
 
       setVideos(allVideos);
