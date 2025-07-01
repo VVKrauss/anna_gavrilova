@@ -712,6 +712,8 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
             <span>Из галереи: {videos.filter(v => v.type === 'storage').length}</span>
             <span>Встроенных: {videos.filter(v => v.type === 'embedded').length}</span>
             <span>Внешних: {videos.filter(v => v.type === 'external').length}</span>
+
+            
           </div>
         </div>
 
