@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { GlassCard } from '../GlassCard';
 import { MediaItem } from '../../types';
-import { Play, Pause, Volume2, VolumeX, Maximize, Download, ExternalLink, Loader } from 'lucide-react';
+import { Play, Pause, Volume2, VolumeX, Maximize, Download, ExternalLink } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 
 interface Video {
@@ -12,9 +12,6 @@ interface Video {
   isVertical?: boolean;
   type: 'storage' | 'embedded' | 'external';
   platform?: string;
-  loaded?: boolean;
-  loading?: boolean;
-  thumbnail?: string;
 }
 
 interface VideosSectionProps {
@@ -72,75 +69,8 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
   const [isMuted, setIsMuted] = useState<{ [key: string]: boolean }>({});
   const [currentTime, setCurrentTime] = useState<{ [key: string]: number }>({});
   const [duration, setDuration] = useState<{ [key: string]: number }>({});
-  const [loadingStorageVideos, setLoadingStorageVideos] = useState(false);
   
   const videoRefs = useRef<{ [key: string]: HTMLVideoElement }>({});
-  const searchAbortController = useRef<AbortController | null>(null);
-
-  // Функция для проверки существования видеофайла
-  const checkVideoExists = async (fileName: string): Promise<boolean> => {
-    try {
-      const testUrl = `https://uvcywpcikjcdyzyosvhx.supabase.co/storage/v1/object/public/annagavrilova/video/${encodeURIComponent(fileName)}`;
-      
-      const response = await fetch(testUrl, { 
-        method: 'HEAD',
-        signal: searchAbortController.current?.signal,
-        cache: 'no-cache'
-      });
-      
-      return response.ok;
-    } catch (error) {
-      return false;
-    }
-  };
-
-  // Умный поиск с остановкой при первой пропущенной последовательности
-  const findStorageVideos = async (): Promise<Video[]> => {
-    const foundVideos: Video[] = [];
-    const extensions = ['mp4', 'mov', 'avi', 'webm', 'ogg', 'mkv'];
-    
-    console.log('🔍 Smart searching for storage videos...');
-    
-    // Проверяем последовательно от 1 до 50
-    for (let i = 1; i <= 50; i++) {
-      if (searchAbortController.current?.signal.aborted) break;
-      
-      let foundAnyForNumber = false;
-      const numberStr = i.toString().padStart(2, '0');
-      
-      // Проверяем все расширения для текущего номера
-      for (const ext of extensions) {
-        const fileName = `video_${numberStr}.${ext}`;
-        
-        if (await checkVideoExists(fileName)) {
-          const video: Video = {
-            id: `storage-video-${foundVideos.length}`,
-            url: `https://uvcywpcikjcdyzyosvhx.supabase.co/storage/v1/object/public/annagavrilova/video/${encodeURIComponent(fileName)}`,
-            name: `video_${numberStr}`,
-            type: 'storage',
-            loaded: false,
-            loading: false
-          };
-          
-          foundVideos.push(video);
-          foundAnyForNumber = true;
-          console.log(`✅ Found: ${fileName}`);
-          break; // Нашли файл для этого номера, переходим к следующему
-        }
-      }
-      
-      // Если не нашли файл для текущего номера, останавливаем поиск
-      if (!foundAnyForNumber) {
-        console.log(`❌ No video found for number ${numberStr}, stopping search`);
-        break;
-      }
-      
-      // Небольшая пауза между запросами
-      await new Promise(resolve => setTimeout(resolve, 50));
-    }
-    
-    return foundVideos;
-  };
 
   useEffect(() => {
     const fetchVideos = async () => {
@@ -148,7 +78,181 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
         setLoading(true);
         let allVideos: Video[] = [];
         
-        // 1. СНАЧАЛА загружаем видео из базы данных (мгновенно)
+        // 1. Загружаем видео из Supabase Storage
+        try {
+          console.log('🎥 Fetching videos from storage...');
+          
+          // Пробуем получить содержимое папки video через API
+          const { data: bucketData, error: bucketError } = await supabase
+            .storage
+            .from('annagavrilova')
+            .list('video', {
+              limit: 100,
+              sortBy: { column: 'name', order: 'asc' }
+            });
+
+          let foundStorageVideos = false;
+
+          if (!bucketError && bucketData && bucketData.length > 0) {
+            const videoFiles = bucketData.filter(file => {
+              return file.name && 
+                     file.name !== '.emptyFolderPlaceholder' && 
+                     /\.(mp4|mov|avi|webm|ogg|mkv)$/i.test(file.name);
+            });
+
+            if (videoFiles.length > 0) {
+              const storageVideos: Video[] = videoFiles.map((file, index) => {
+                const videoUrl = `https://uvcywpcikjcdyzyosvhx.supabase.co/storage/v1/object/public/annagavrilova/video/${encodeURIComponent(file.name)}`;
+                
+                return {
+                  id: `storage-video-${index}`,
+                  url: videoUrl,
+                  name: file.name.replace(/\.[^/.]+$/, ''),
+                  type: 'storage'
+                };
+              });
+
+              allVideos = [...allVideos, ...storageVideos];
+              console.log(`✅ Found ${storageVideos.length} videos via API:`, storageVideos.map(v => v.name));
+              foundStorageVideos = true;
+            }
+          }
+
+          // Если API не сработал, используем поиск по шаблону video_NN.*
+          if (!foundStorageVideos) {
+            console.log('🔄 API failed, searching by pattern video_NN.*');
+            
+            // Генерируем имена файлов по шаблону video_01, video_02, etc.
+            const videoExtensions = ['mp4', 'mov', 'avi', 'webm', 'ogg', 'mkv'];
+            const possibleFiles: string[] = [];
+            
+            // Проверяем video_01 до video_50 (можно изменить диапазон)
+            for (let i = 1; i <= 50; i++) {
+              const numberStr = i.toString().padStart(2, '0'); // 01, 02, 03, ...
+              
+              for (const ext of videoExtensions) {
+                possibleFiles.push(`video_${numberStr}.${ext}`);
+              }
+            }
+
+            // Добавляем также без ведущего нуля (video_1, video_2, etc.)
+            for (let i = 1; i <= 50; i++) {
+              for (const ext of videoExtensions) {
+                possibleFiles.push(`video_${i}.${ext}`);
+              }
+            }
+
+            // Добавляем другие возможные паттерны
+            const additionalPatterns = [
+              'video.mp4', 'video.mov', 'video.avi', 'video.webm',
+              'video_2025-07-01_20-05-03.mp4', // известный файл
+            ];
+
+            const allFiles = [...possibleFiles, ...additionalPatterns];
+            const workingVideos: Video[] = [];
+
+            console.log(`🔍 Testing ${allFiles.length} files with pattern video_NN.*`);
+            
+            // Проверяем файлы батчами
+            const batchSize = 5;
+            let testedCount = 0;
+            
+            for (let i = 0; i < allFiles.length; i += batchSize) {
+              const batch = allFiles.slice(i, i + batchSize);
+              
+              const results = await Promise.allSettled(
+                batch.map(async (fileName) => {
+                  const testUrl = `https://uvcywpcikjcdyzyosvhx.supabase.co/storage/v1/object/public/annagavrilova/video/${encodeURIComponent(fileName)}`;
+                  
+                  try {
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 2000);
+                    
+                    const response = await fetch(testUrl, { 
+                      method: 'HEAD',
+                      signal: controller.signal,
+                      cache: 'no-cache'
+                    });
+                    
+                    clearTimeout(timeoutId);
+                    
+                    if (response.ok) {
+                      return {
+                        fileName,
+                        url: testUrl,
+                        success: true
+                      };
+                    }
+                    return { fileName, success: false };
+                  } catch (error) {
+                    return { fileName, success: false };
+                  }
+                })
+              );
+              
+              // Обрабатываем результаты
+              results.forEach((result) => {
+                testedCount++;
+                if (result.status === 'fulfilled' && result.value.success) {
+                  const video: Video = {
+                    id: `pattern-video-${workingVideos.length}`,
+                    url: result.value.url,
+                    name: result.value.fileName.replace(/\.[^/.]+$/, ''),
+                    type: 'storage'
+                  };
+                  workingVideos.push(video);
+                  console.log(`✅ Found: ${result.value.fileName}`);
+                }
+              });
+              
+              // Показываем прогресс каждые 25 файлов
+              if (testedCount % 25 === 0 || testedCount === allFiles.length) {
+                console.log(`📊 Progress: ${testedCount}/${allFiles.length} tested | Found: ${workingVideos.length} videos`);
+              }
+              
+              // Пауза между батчами
+              if (i + batchSize < allFiles.length) {
+                await new Promise(resolve => setTimeout(resolve, 100));
+              }
+            }
+
+            if (workingVideos.length > 0) {
+              // Сортируем найденные видео по имени
+              workingVideos.sort((a, b) => a.name.localeCompare(b.name));
+              
+              allVideos = [...allVideos, ...workingVideos];
+              console.log(`🎉 Found ${workingVideos.length} videos by pattern!`);
+              console.log('📋 Video list:', workingVideos.map(v => v.name));
+            } else {
+              console.log('❌ No videos found with pattern video_NN.*');
+              console.log(`
+🎥 ДОБАВЬТЕ ВИДЕО В STORAGE:
+
+1. ОТКРОЙТЕ SUPABASE DASHBOARD:
+   - https://supabase.com/dashboard
+   - Проект > Storage > annagavrilova > video/
+
+2. ЗАГРУЗИТЕ ФАЙЛЫ С ИМЕНАМИ:
+   - video_01.mp4
+   - video_02.mp4  
+   - video_03.mp4
+   - и т.д.
+
+3. ПОДДЕРЖИВАЕМЫЕ РАСШИРЕНИЯ:
+   - .mp4, .mov, .avi, .webm, .ogg, .mkv
+
+4. ТЕКУЩИЙ URL ПАТТЕРН:
+   https://uvcywpcikjcdyzyosvhx.supabase.co/storage/v1/object/public/annagavrilova/video/video_01.mp4
+
+Код автоматически найдет файлы video_01 до video_50 с любым поддерживаемым расширением!
+              `);
+            }
+          }
+        } catch (storageErr) {
+          console.error('💥 Storage error:', storageErr);
+        }
+
+        // 2. Добавляем видео из базы данных (встроенные и внешние)
         if (data && Array.isArray(data)) {
           const validDatabaseVideos = data.filter(video => 
             video && video.url && typeof video.url === 'string' && video.url.trim() !== ''
@@ -163,105 +267,28 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
               name: video.title || 'Без названия',
               caption: video.caption,
               type: isExternal ? 'external' : 'embedded',
-              platform: isExternal ? getPlatformName(video.url) : undefined,
-              loaded: true // БД видео сразу готовы к показу
+              platform: isExternal ? getPlatformName(video.url) : undefined
             };
           });
 
-          allVideos = [...databaseVideos];
-          console.log(`✅ Loaded ${databaseVideos.length} database videos instantly`);
+          allVideos = [...allVideos, ...databaseVideos];
+          console.log('Found database videos:', databaseVideos);
         }
 
-        // Показываем видео из БД сразу
+        console.log('All videos combined:', allVideos);
         setVideos(allVideos);
-        setLoading(false);
-        
-        // 2. ЗАТЕМ ищем видео в Storage в фоне
-        setLoadingStorageVideos(true);
-        searchAbortController.current = new AbortController();
-        
-        try {
-          // Сначала пробуем API (быстро)
-          const { data: bucketData, error: bucketError } = await supabase
-            .storage
-            .from('annagavrilova')
-            .list('video', {
-              limit: 100,
-              sortBy: { column: 'name', order: 'asc' }
-            });
-
-          let storageVideos: Video[] = [];
-
-          if (!bucketError && bucketData && bucketData.length > 0) {
-            const videoFiles = bucketData.filter(file => {
-              return file.name && 
-                     file.name !== '.emptyFolderPlaceholder' && 
-                     /\.(mp4|mov|avi|webm|ogg|mkv)$/i.test(file.name);
-            });
-
-            if (videoFiles.length > 0) {
-              storageVideos = videoFiles.map((file, index) => ({
-                id: `api-storage-video-${index}`,
-                url: `https://uvcywpcikjcdyzyosvhx.supabase.co/storage/v1/object/public/annagavrilova/video/${encodeURIComponent(file.name)}`,
-                name: file.name.replace(/\.[^/.]+$/, ''),
-                type: 'storage',
-                loaded: false,
-                loading: false
-              }));
-              
-              console.log(`✅ Found ${storageVideos.length} videos via API`);
-            }
-          } else {
-            // Если API не сработал, используем умный поиск
-            console.log('🔄 API failed, using smart search...');
-            storageVideos = await findStorageVideos();
-          }
-
-          // Добавляем найденные Storage видео
-          if (storageVideos.length > 0) {
-            storageVideos.sort((a, b) => a.name.localeCompare(b.name));
-            setVideos(prev => [...prev, ...storageVideos]);
-            console.log(`🎉 Added ${storageVideos.length} storage videos as placeholders`);
-          }
-          
-        } catch (storageErr) {
-          console.error('💥 Storage search error:', storageErr);
-        } finally {
-          setLoadingStorageVideos(false);
-        }
-
       } catch (err) {
         console.error('Ошибка загрузки видео:', err);
         setError(err instanceof Error ? err.message : 'Ошибка загрузки');
+      } finally {
         setLoading(false);
       }
     };
 
     fetchVideos();
-
-    // Cleanup
-    return () => {
-      if (searchAbortController.current) {
-        searchAbortController.current.abort();
-      }
-    };
   }, [data]);
 
-  // Функция для ленивой загрузки видео при клике
-  const loadVideo = async (videoId: string) => {
-    setVideos(prev => prev.map(v => 
-      v.id === videoId ? { ...v, loading: true } : v
-    ));
-
-    // Имитируем небольшую задержку для UX
-    await new Promise(resolve => setTimeout(resolve, 500));
-
-    setVideos(prev => prev.map(v => 
-      v.id === videoId ? { ...v, loaded: true, loading: false } : v
-    ));
-  };
-
-  // Определяем ориентацию видео после загрузки метаданных
+  // Определяем ориентацию видео после загрузки метаданных (только для storage видео)
   const handleLoadedMetadata = (videoId: string) => {
     const video = videoRefs.current[videoId];
     if (video) {
@@ -273,14 +300,7 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
     }
   };
 
-  const togglePlay = async (videoId: string) => {
-    const videoObj = videos.find(v => v.id === videoId);
-    
-    // Если видео не загружено, загружаем его
-    if (videoObj && !videoObj.loaded && !videoObj.loading) {
-      await loadVideo(videoId);
-    }
-
+  const togglePlay = (videoId: string) => {
     const video = videoRefs.current[videoId];
     if (!video) return;
 
@@ -371,6 +391,7 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
             </div>
           )}
           
+          {/* Platform badge */}
           <div className="absolute top-4 right-4 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
             <div className="bg-black/50 backdrop-blur-sm text-white px-3 py-1 rounded-full text-xs font-poiret flex items-center space-x-1">
               <ExternalLink className="w-3 h-3" />
@@ -386,6 +407,7 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
           <p className="text-slate-600 font-poiret mb-4">{video.caption}</p>
         )}
         
+        {/* Direct link to original video */}
         <div className="mt-4">
           <a
             href={video.url}
@@ -401,64 +423,12 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
     );
   };
 
-  // Рендер заглушки для незагруженного видео
-  const renderVideoPlaceholder = (video: Video) => {
-    return (
-      <GlassCard key={video.id} className="p-4 animate-fade-in-left">
-        <div className="relative group">
-          <div className="relative rounded-lg overflow-hidden bg-gradient-to-br from-slate-100 to-slate-200 aspect-video">
-            <div className="absolute inset-0 flex items-center justify-center">
-              <div className="text-center">
-                {video.loading ? (
-                  <div className="flex flex-col items-center space-y-3">
-                    <Loader className="w-12 h-12 text-slate-500 animate-spin" />
-                    <p className="text-slate-600 font-poiret">Загрузка...</p>
-                  </div>
-                ) : (
-                  <div className="flex flex-col items-center space-y-3">
-                    <button
-                      onClick={() => loadVideo(video.id)}
-                      className="w-16 h-16 bg-white/90 backdrop-blur-sm rounded-full flex items-center justify-center hover:bg-white transition-all duration-200 hover:scale-110 shadow-lg"
-                    >
-                      <Play className="w-8 h-8 text-slate-700 ml-1" />
-                    </button>
-                    <p className="text-slate-600 font-poiret text-sm">Нажмите для загрузки</p>
-                  </div>
-                )}
-              </div>
-            </div>
-            
-            {/* Type Badge */}
-            <div className="absolute top-4 left-4">
-              <div className="bg-green-500/80 text-white px-3 py-1 rounded-full text-xs font-poiret">
-                Из галереи
-              </div>
-            </div>
-          </div>
-
-          <div className="mt-3">
-            <h3 className="text-lg font-poiret font-bold text-slate-800 truncate">
-              {video.name}
-            </h3>
-            <span className="inline-block px-2 py-1 bg-orange-100 text-orange-700 text-xs rounded-full font-poiret mt-1">
-              Ожидает загрузки
-            </span>
-          </div>
-        </div>
-      </GlassCard>
-    );
-  };
-
   // Рендер для локального видео (storage или embedded)
   const renderLocalVideo = (video: Video) => {
-    // Если видео не загружено, показываем заглушку
-    if (!video.loaded && video.type === 'storage') {
-      return renderVideoPlaceholder(video);
-    }
-
     return (
       <GlassCard key={video.id} className="p-4 animate-fade-in-left">
         <div className="relative group">
+          {/* Video Container */}
           <div className={`relative rounded-lg overflow-hidden bg-black ${
             video.isVertical ? 'aspect-[9/16]' : 'aspect-video'
           }`}>
@@ -468,15 +438,28 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
               }}
               src={video.url}
               className="w-full h-full object-contain cursor-pointer"
-              onLoadedMetadata={() => handleLoadedMetadata(video.id)}
+              onLoadedMetadata={() => {
+                console.log(`Video metadata loaded for ${video.id}:`, video.url);
+                handleLoadedMetadata(video.id);
+              }}
               onTimeUpdate={() => handleTimeUpdate(video.id)}
               onEnded={() => handleVideoEnd(video.id)}
               onClick={() => togglePlay(video.id)}
               onError={(e) => {
-                console.error(`Video error for ${video.id}:`, video.url);
+                console.error(`Video error for ${video.id}:`, e);
+                console.error('Video URL:', video.url);
+                const target = e.target as HTMLVideoElement;
+                console.error('Video error details:', {
+                  error: target.error,
+                  networkState: target.networkState,
+                  readyState: target.readyState
+                });
               }}
+              onLoadStart={() => console.log(`Video load start for ${video.id}`)}
+              onCanPlay={() => console.log(`Video can play for ${video.id}`)}
               muted={isMuted[video.id] || false}
               preload="metadata"
+              crossOrigin="anonymous"
             />
 
             {/* Play/Pause Overlay */}
@@ -495,17 +478,20 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
 
             {/* Video Type Badge */}
             <div className="absolute top-4 left-4 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
-              <div className={`px-3 py-1 rounded-full text-xs font-poiret ${
+              <div className={`px-3 py-1 rounded-full text-xs font-poiret flex items-center space-x-1 ${
                 video.type === 'storage' 
                   ? 'bg-green-500/80 text-white' 
                   : 'bg-blue-500/80 text-white'
               }`}>
-                {video.type === 'storage' ? 'Загружено' : 'Встроено'}
+                <span>
+                  {video.type === 'storage' ? 'Загружено' : 'Встроено'}
+                </span>
               </div>
             </div>
 
             {/* Controls */}
             <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/60 to-transparent p-4 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+              {/* Progress Bar */}
               {duration[video.id] && (
                 <div className="mb-3">
                   <input
@@ -526,6 +512,7 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
                 </div>
               )}
 
+              {/* Control Buttons */}
               <div className="flex items-center justify-between text-white">
                 <div className="flex items-center space-x-2">
                   <button
@@ -580,6 +567,7 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
             </div>
           </div>
 
+          {/* Video Title */}
           <div className="mt-3">
             <h3 className="text-lg font-poiret font-bold text-slate-800 truncate">
               {video.name}
@@ -698,12 +686,6 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
             <span>Из галереи: {videos.filter(v => v.type === 'storage').length}</span>
             <span>Встроенных: {videos.filter(v => v.type === 'embedded').length}</span>
             <span>Внешних: {videos.filter(v => v.type === 'external').length}</span>
-            {loadingStorageVideos && (
-              <span className="text-blue-600 flex items-center space-x-1">
-                <Loader className="w-3 h-3 animate-spin" />
-                <span>Поиск видео...</span>
-              </span>
-            )}
           </div>
         </div>
 
