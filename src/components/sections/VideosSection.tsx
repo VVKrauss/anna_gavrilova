@@ -80,7 +80,80 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const loadingTimeoutRef = useRef<NodeJS.Timeout>();
   
-  const videoRefs = useRef<{ [key: string]: HTMLVideoElement }>({});
+  // Fallback: Load videos by testing pattern
+  const loadVideosByPattern = async (): Promise<Video[]> => {
+    console.log('🔍 Testing video pattern...');
+    const foundVideos: Video[] = [];
+    const extensions = ['mp4', 'mov', 'avi', 'webm'];
+    
+    // Test common patterns
+    const testPatterns = [
+      // Numbered patterns
+      ...Array.from({ length: 20 }, (_, i) => {
+        const num = (i + 1).toString().padStart(2, '0');
+        return extensions.map(ext => `video_${num}.${ext}`);
+      }).flat(),
+      // Simple patterns
+      ...extensions.map(ext => [`video.${ext}`, `test.${ext}`, `demo.${ext}`]).flat(),
+      // Known file (if exists)
+      'video_2025-07-01_20-05-03.mp4'
+    ];
+
+    console.log(`🧪 Testing ${testPatterns.length} patterns...`);
+
+    // Test in batches to avoid overwhelming the server
+    const batchSize = 5;
+    for (let i = 0; i < testPatterns.length; i += batchSize) {
+      const batch = testPatterns.slice(i, i + batchSize);
+      
+      const results = await Promise.allSettled(
+        batch.map(async (fileName) => {
+          const testUrl = `https://uvcywpcikjcdyzyosvhx.supabase.co/storage/v1/object/public/annagavrilova/video/${encodeURIComponent(fileName)}`;
+          
+          try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 3000);
+            
+            const response = await fetch(testUrl, { 
+              method: 'HEAD',
+              signal: controller.signal
+            });
+            
+            clearTimeout(timeoutId);
+            
+            if (response.ok) {
+              console.log(`✅ Found: ${fileName}`);
+              return {
+                id: `pattern-video-${foundVideos.length}`,
+                url: testUrl,
+                name: fileName.replace(/\.[^/.]+$/, ''),
+                type: 'storage' as const,
+                loaded: true
+              };
+            }
+            return null;
+          } catch (error) {
+            return null;
+          }
+        })
+      );
+      
+      // Add successful results
+      results.forEach((result) => {
+        if (result.status === 'fulfilled' && result.value) {
+          foundVideos.push(result.value);
+        }
+      });
+      
+      // Small delay between batches
+      if (i + batchSize < testPatterns.length) {
+        await new Promise(resolve => setTimeout(resolve, 200));
+      }
+    }
+
+    console.log(`🎯 Pattern search found ${foundVideos.length} videos`);
+    return foundVideos;
+  };
 
   // Initialize videos
   const initializeVideos = useCallback(async () => {
@@ -114,6 +187,8 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
 
       // 2. Load storage videos from Supabase
       try {
+        console.log('🔍 Checking storage bucket...');
+        
         const { data: bucketData, error: bucketError } = await supabase
           .storage
           .from('annagavrilova')
@@ -122,30 +197,68 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
             sortBy: { column: 'name', order: 'asc' }
           });
 
-        if (!bucketError && bucketData && bucketData.length > 0) {
+        console.log('📦 Storage response:', { bucketData, bucketError });
+
+        if (bucketError) {
+          console.error('❌ Storage error:', bucketError);
+        }
+
+        if (bucketData && bucketData.length > 0) {
+          console.log('📂 Found files:', bucketData.map(f => f.name));
+          
           const videoFiles = bucketData.filter(file => 
             file.name && 
             file.name !== '.emptyFolderPlaceholder' && 
             /\.(mp4|mov|avi|webm|ogg|mkv)$/i.test(file.name)
           );
 
-          const storageVideos: Video[] = videoFiles.map((file, index) => {
-            const videoUrl = `https://uvcywpcikjcdyzyosvhx.supabase.co/storage/v1/object/public/annagavrilova/video/${encodeURIComponent(file.name)}`;
-            
-            return {
-              id: `storage-video-${index}`,
-              url: videoUrl,
-              name: file.name.replace(/\.[^/.]+$/, ''),
-              type: 'storage',
-              loaded: true
-            };
-          });
+          console.log('🎥 Video files:', videoFiles.map(f => f.name));
 
-          allVideos = [...allVideos, ...storageVideos];
-          console.log('✅ Loaded storage videos:', storageVideos.length);
+          if (videoFiles.length > 0) {
+            const storageVideos: Video[] = videoFiles.map((file, index) => {
+              const videoUrl = `https://uvcywpcikjcdyzyosvhx.supabase.co/storage/v1/object/public/annagavrilova/video/${encodeURIComponent(file.name)}`;
+              
+              console.log(`📹 Creating video: ${file.name} -> ${videoUrl}`);
+              
+              return {
+                id: `storage-video-${index}`,
+                url: videoUrl,
+                name: file.name.replace(/\.[^/.]+$/, ''),
+                type: 'storage',
+                loaded: true
+              };
+            });
+
+            allVideos = [...allVideos, ...storageVideos];
+            console.log('✅ Added storage videos:', storageVideos.length);
+          } else {
+            console.log('⚠️ No video files found in storage');
+          }
+        } else {
+          console.log('📭 No files in storage bucket');
+          
+          // Fallback: try to load videos by pattern
+          console.log('🔍 Trying pattern-based loading...');
+          const patternVideos = await loadVideosByPattern();
+          if (patternVideos.length > 0) {
+            allVideos = [...allVideos, ...patternVideos];
+            console.log('✅ Loaded videos by pattern:', patternVideos.length);
+          }
         }
       } catch (storageErr) {
-        console.log('⚠️ Storage API failed, videos from database only');
+        console.error('💥 Storage loading failed:', storageErr);
+        
+        // Fallback: try pattern loading
+        console.log('🔄 Falling back to pattern loading...');
+        try {
+          const patternVideos = await loadVideosByPattern();
+          if (patternVideos.length > 0) {
+            allVideos = [...allVideos, ...patternVideos];
+            console.log('✅ Fallback pattern loading successful:', patternVideos.length);
+          }
+        } catch (patternErr) {
+          console.error('💥 Pattern loading also failed:', patternErr);
+        }
       }
 
       setVideos(allVideos);
