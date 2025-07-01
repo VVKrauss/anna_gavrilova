@@ -185,11 +185,12 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
         console.log('✅ Loaded embedded/external videos:', databaseVideos.length);
       }
 
-      // 2. Load storage videos from Supabase (only if bucket has files)
+      // 2. Load storage videos from Supabase (check both video folder and root)
       try {
         console.log('🔍 Checking storage bucket...');
         
-        const { data: bucketData, error: bucketError } = await supabase
+        // First try the video folder
+        const { data: videoFolderData, error: videoFolderError } = await supabase
           .storage
           .from('annagavrilova')
           .list('video', {
@@ -197,27 +198,24 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
             sortBy: { column: 'name', order: 'asc' }
           });
 
-        console.log('📦 Storage response:', { bucketData, bucketError });
+        console.log('📦 Video folder response:', { videoFolderData, videoFolderError });
 
-        if (!bucketError && bucketData && bucketData.length > 0) {
-          console.log('📂 Found files:', bucketData.map(f => f.name));
-          
-          const videoFiles = bucketData.filter(file => 
+        let allStorageVideos: Video[] = [];
+
+        // Check video folder
+        if (!videoFolderError && videoFolderData && videoFolderData.length > 0) {
+          const videoFiles = videoFolderData.filter(file => 
             file.name && 
             file.name !== '.emptyFolderPlaceholder' && 
             /\.(mp4|mov|avi|webm|ogg|mkv)$/i.test(file.name)
           );
 
-          console.log('🎥 Video files:', videoFiles.map(f => f.name));
-
           if (videoFiles.length > 0) {
-            const storageVideos: Video[] = videoFiles.map((file, index) => {
+            const folderVideos: Video[] = videoFiles.map((file, index) => {
               const videoUrl = `https://uvcywpcikjcdyzyosvhx.supabase.co/storage/v1/object/public/annagavrilova/video/${encodeURIComponent(file.name)}`;
               
-              console.log(`📹 Creating video: ${file.name} -> ${videoUrl}`);
-              
               return {
-                id: `storage-video-${index}`,
+                id: `folder-video-${index}`,
                 url: videoUrl,
                 name: file.name.replace(/\.[^/.]+$/, ''),
                 type: 'storage',
@@ -225,14 +223,58 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
               };
             });
 
-            allVideos = [...allVideos, ...storageVideos];
-            console.log('✅ Added storage videos:', storageVideos.length);
-          } else {
-            console.log('📁 No video files found in storage folder');
+            allStorageVideos = [...allStorageVideos, ...folderVideos];
+            console.log('✅ Found videos in video/ folder:', folderVideos.length);
           }
-        } else {
-          console.log('📭 Storage bucket is empty or not accessible');
         }
+
+        // Also check root bucket for direct video files
+        const { data: rootData, error: rootError } = await supabase
+          .storage
+          .from('annagavrilova')
+          .list('', {
+            limit: 100,
+            sortBy: { column: 'name', order: 'asc' }
+          });
+
+        console.log('📦 Root bucket response:', { rootData, rootError });
+
+        if (!rootError && rootData && rootData.length > 0) {
+          const rootVideoFiles = rootData.filter(file => 
+            file.name && 
+            file.name !== '.emptyFolderPlaceholder' && 
+            /\.(mp4|mov|avi|webm|ogg|mkv)$/i.test(file.name)
+          );
+
+          console.log('🎥 Root video files:', rootVideoFiles.map(f => f.name));
+
+          if (rootVideoFiles.length > 0) {
+            const rootVideos: Video[] = rootVideoFiles.map((file, index) => {
+              const videoUrl = `https://uvcywpcikjcdyzyosvhx.supabase.co/storage/v1/object/public/annagavrilova/${encodeURIComponent(file.name)}`;
+              
+              console.log(`📹 Creating root video: ${file.name} -> ${videoUrl}`);
+              
+              return {
+                id: `root-video-${index}`,
+                url: videoUrl,
+                name: file.name.replace(/\.[^/.]+$/, ''),
+                type: 'storage',
+                loaded: true
+              };
+            });
+
+            allStorageVideos = [...allStorageVideos, ...rootVideos];
+            console.log('✅ Found videos in root bucket:', rootVideos.length);
+          }
+        }
+
+        if (allStorageVideos.length > 0) {
+          allVideos = [...allVideos, ...allStorageVideos];
+          console.log('🎯 Total storage videos added:', allStorageVideos.length);
+        } else {
+          console.log('📁 No video files found in storage');
+        }
+
       } catch (storageErr) {
         console.log('⚠️ Storage loading failed:', storageErr);
       }
@@ -929,4 +971,4 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
       </div>
     </section>
   );
-};  
+};
