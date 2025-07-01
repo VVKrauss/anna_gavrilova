@@ -81,7 +81,9 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
   
   // Lazy loading state
   const [loadedCount, setLoadedCount] = useState(0);
+  const [totalStorageCount, setTotalStorageCount] = useState(0);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [loadingProgress, setLoadingProgress] = useState(0);
   const loadingTimeoutRef = useRef<NodeJS.Timeout>();
   
   const videoRefs = useRef<{ [key: string]: HTMLVideoElement }>({});
@@ -117,7 +119,11 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
         console.log('✅ Loaded embedded/external videos:', databaseVideos.length);
       }
 
-      // 2. Then prepare storage video placeholders (will be lazy loaded)
+      // 2. Count storage files first
+      const storageCount = await countStorageFiles();
+      setTotalStorageCount(storageCount);
+      
+      // 3. Then prepare storage video placeholders (will be lazy loaded)
       const storageVideoPlaceholders = await prepareStorageVideoPlaceholders();
       
       const allVideos = [...initialVideos, ...storageVideoPlaceholders];
@@ -141,7 +147,70 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
     }
   }, [data]);
 
-  // Prepare storage video placeholders
+  // Count total storage files before loading
+  const countStorageFiles = async (): Promise<number> => {
+    console.log('📊 Counting storage files...');
+    
+    try {
+      // Try API first to get exact count
+      const { data: bucketData, error: bucketError } = await supabase
+        .storage
+        .from('annagavrilova')
+        .list('video', {
+          limit: 1000, // High limit to get all files
+          sortBy: { column: 'name', order: 'asc' }
+        });
+
+      if (!bucketError && bucketData && bucketData.length > 0) {
+        const videoFiles = bucketData.filter(file => 
+          file.name && 
+          file.name !== '.emptyFolderPlaceholder' && 
+          /\.(mp4|mov|avi|webm|ogg|mkv)$/i.test(file.name)
+        );
+        
+        const count = videoFiles.length;
+        console.log(`✅ API count: ${count} video files found`);
+        return count;
+      }
+    } catch (err) {
+      console.log('⚠️ API count failed, will estimate:', err);
+    }
+
+    // Fallback: Quick estimation by testing pattern
+    console.log('🔍 Estimating count by testing pattern...');
+    
+    const extensions = ['mp4', 'mov', 'avi', 'webm'];
+    const testPromises: Promise<boolean>[] = [];
+    
+    // Test first 50 possible files quickly
+    for (let i = 1; i <= 50; i++) {
+      const numberStr = i.toString().padStart(2, '0');
+      
+      for (const ext of extensions) {
+        const fileName = `video_${numberStr}.${ext}`;
+        const testUrl = `https://uvcywpcikjcdyzyosvhx.supabase.co/storage/v1/object/public/annagavrilova/video/${encodeURIComponent(fileName)}`;
+        
+        testPromises.push(
+          fetch(testUrl, { 
+            method: 'HEAD',
+            signal: AbortSignal.timeout(1000) // 1 second timeout per file
+          })
+          .then(response => response.ok)
+          .catch(() => false)
+        );
+      }
+    }
+    
+    try {
+      const results = await Promise.all(testPromises);
+      const estimatedCount = results.filter(Boolean).length;
+      console.log(`📈 Estimated count: ${estimatedCount} video files`);
+      return estimatedCount;
+    } catch (err) {
+      console.log('⚠️ Estimation failed, using default');
+      return 20; // Default estimate
+    }
+  };
   const prepareStorageVideoPlaceholders = async (): Promise<Video[]> => {
     const placeholders: Video[] = [];
     
@@ -180,7 +249,7 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
         // Fallback to pattern search
         console.log('🔄 Using pattern search for storage videos');
         
-        for (let i = 1; i <= 20; i++) { // Reduced initial search
+        for (let i = 1; i <= Math.max(20, storageCount); i++) { // Use counted amount or default
           const numberStr = i.toString().padStart(2, '0');
           const extensions = ['mp4', 'mov', 'avi', 'webm'];
           
@@ -257,7 +326,7 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
       const results = await Promise.all(loadPromises);
       const validVideos = results.filter(Boolean) as Video[];
       
-      // Update videos state
+      // Update videos state and progress
       setVideos(prev => {
         const updated = prev.map(v => {
           const result = validVideos.find(r => r.id === v.id);
@@ -273,13 +342,24 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
         return updated;
       });
       
-      setLoadedCount(prev => prev + validVideos.length);
+      const newLoadedCount = loadedCount + validVideos.length;
+      setLoadedCount(newLoadedCount);
+      
+      // Update progress percentage
+      const progress = totalStorageCount > 0 ? Math.round((newLoadedCount / totalStorageCount) * 100) : 0;
+      setLoadingProgress(progress);
+      
       setIsLoadingMore(false);
       
-      // Continue loading if there are more videos
+      console.log(`📊 Progress: ${newLoadedCount}/${totalStorageCount} (${progress}%)`);
+      
+      // Continue loading if there are more videos and we found some in this batch
       const stillHasUnloaded = videos.some(v => v.type === 'storage' && !v.loaded && !v.loading);
-      if (stillHasUnloaded && validVideos.length > 0) {
+      if (stillHasUnloaded && validVideos.length > 0 && newLoadedCount < totalStorageCount) {
         loadingTimeoutRef.current = setTimeout(loadNextBatch, 2000); // Wait 2s between batches
+      } else {
+        console.log('🏁 Lazy loading completed');
+        setLoadingProgress(100);
       }
     };
     
@@ -503,7 +583,14 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
             <div className="flex space-x-4 text-sm text-slate-600 font-poiret">
               <span>Загружено: {loadedVideos.length}</span>
               <span>Всего: {videos.length}</span>
-              {isLoadingMore && <span className="text-blue-600">⏳ Загрузка...</span>}
+              {totalStorageCount > 0 && (
+                <span>Из галереи: {loadedCount}/{totalStorageCount}</span>
+              )}
+              {isLoadingMore && (
+                <span className="text-blue-600">
+                  ⏳ Загрузка {loadingProgress}%
+                </span>
+              )}
             </div>
             
             {/* View Mode Toggle */}
@@ -773,9 +860,27 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
                   {/* Loading indicator for lazy loading */}
                   {isLoadingMore && (
                     <div className="p-3 text-center">
-                      <div className="flex items-center justify-center space-x-2">
-                        <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
-                        <span className="text-sm font-poiret text-slate-600">Загрузка видео...</span>
+                      <div className="flex flex-col items-center space-y-2">
+                        <div className="flex items-center space-x-2">
+                          <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+                          <span className="text-sm font-poiret text-slate-600">
+                            Загрузка видео {loadingProgress}%
+                          </span>
+                        </div>
+                        
+                        {totalStorageCount > 0 && (
+                          <div className="w-full max-w-32">
+                            <div className="bg-slate-200 rounded-full h-1.5 overflow-hidden">
+                              <div 
+                                className="bg-blue-500 h-full transition-all duration-300 ease-out"
+                                style={{ width: `${loadingProgress}%` }}
+                              />
+                            </div>
+                            <div className="text-xs text-slate-500 mt-1 font-poiret">
+                              {loadedCount}/{totalStorageCount} файлов
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </div>
                   )}
@@ -1025,13 +1130,33 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
         )}
         
         {/* Loading Progress at bottom */}
-        {isLoadingMore && (
+        {isLoadingMore && totalStorageCount > 0 && (
           <div className="mt-8 text-center">
-            <div className="inline-flex items-center space-x-3 bg-white/20 backdrop-blur-md border border-white/30 rounded-full px-6 py-3">
-              <div className="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
-              <span className="font-poiret text-slate-700">
-                Загружаем видео из галереи... ({loadedCount}/{videos.filter(v => v.type === 'storage').length})
-              </span>
+            <div className="inline-flex flex-col items-center space-y-3 bg-white/20 backdrop-blur-md border border-white/30 rounded-2xl px-8 py-6">
+              <div className="flex items-center space-x-3">
+                <div className="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+                <span className="font-poiret text-slate-700 font-medium">
+                  Загружаем видео из галереи...
+                </span>
+              </div>
+              
+              <div className="w-64">
+                <div className="bg-slate-200 rounded-full h-2 overflow-hidden">
+                  <div 
+                    className="bg-gradient-to-r from-blue-500 to-purple-500 h-full transition-all duration-500 ease-out"
+                    style={{ width: `${loadingProgress}%` }}
+                  />
+                </div>
+                <div className="flex justify-between text-sm text-slate-600 mt-2 font-poiret">
+                  <span>{loadedCount} загружено</span>
+                  <span>{loadingProgress}%</span>
+                  <span>{totalStorageCount} всего</span>
+                </div>
+              </div>
+              
+              <p className="text-xs text-slate-500 font-poiret">
+                Видео проверяются пакетами для оптимальной производительности
+              </p>
             </div>
           </div>
         )}
