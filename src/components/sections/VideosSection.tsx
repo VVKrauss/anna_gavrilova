@@ -13,8 +13,6 @@ interface Video {
   type: 'storage' | 'embedded' | 'external';
   platform?: string;
   loaded?: boolean;
-  loading?: boolean;
-  thumbnail?: string;
 }
 
 interface VideosSectionProps {
@@ -70,7 +68,6 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
   const [isMuted, setIsMuted] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [volume, setVolume] = useState(1);
   
   // Playlist state
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
@@ -80,22 +77,18 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
   const [autoplay, setAutoplay] = useState(false);
   
   // Lazy loading state
-  const [loadedCount, setLoadedCount] = useState(0);
-  const [totalStorageCount, setTotalStorageCount] = useState(0);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
-  const [loadingProgress, setLoadingProgress] = useState(0);
   const loadingTimeoutRef = useRef<NodeJS.Timeout>();
   
   const videoRefs = useRef<{ [key: string]: HTMLVideoElement }>({});
-  const observerRef = useRef<IntersectionObserver>();
 
-  // Initialize embedded videos first, then lazy load storage videos
+  // Initialize videos
   const initializeVideos = useCallback(async () => {
     try {
       setLoading(true);
-      let initialVideos: Video[] = [];
+      let allVideos: Video[] = [];
       
-      // 1. First load embedded/external videos (instant)
+      // 1. Load embedded/external videos first (instant)
       if (data && Array.isArray(data)) {
         const validDatabaseVideos = data.filter(video => 
           video && video.url && typeof video.url === 'string' && video.url.trim() !== ''
@@ -111,22 +104,50 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
             caption: video.caption,
             type: isExternal ? 'external' : 'embedded',
             platform: isExternal ? getPlatformName(video.url) : undefined,
-            loaded: true // Embedded videos are considered loaded
+            loaded: true
           };
         });
 
-        initialVideos = databaseVideos;
+        allVideos = [...allVideos, ...databaseVideos];
         console.log('✅ Loaded embedded/external videos:', databaseVideos.length);
       }
 
-      // 2. Count storage files first
-      const storageCount = await countStorageFiles();
-      setTotalStorageCount(storageCount);
-      
-      // 3. Then prepare storage video placeholders (will be lazy loaded)
-      const storageVideoPlaceholders = await prepareStorageVideoPlaceholders();
-      
-      const allVideos = [...initialVideos, ...storageVideoPlaceholders];
+      // 2. Load storage videos from Supabase
+      try {
+        const { data: bucketData, error: bucketError } = await supabase
+          .storage
+          .from('annagavrilova')
+          .list('video', {
+            limit: 100,
+            sortBy: { column: 'name', order: 'asc' }
+          });
+
+        if (!bucketError && bucketData && bucketData.length > 0) {
+          const videoFiles = bucketData.filter(file => 
+            file.name && 
+            file.name !== '.emptyFolderPlaceholder' && 
+            /\.(mp4|mov|avi|webm|ogg|mkv)$/i.test(file.name)
+          );
+
+          const storageVideos: Video[] = videoFiles.map((file, index) => {
+            const videoUrl = `https://uvcywpcikjcdyzyosvhx.supabase.co/storage/v1/object/public/annagavrilova/video/${encodeURIComponent(file.name)}`;
+            
+            return {
+              id: `storage-video-${index}`,
+              url: videoUrl,
+              name: file.name.replace(/\.[^/.]+$/, ''),
+              type: 'storage',
+              loaded: true
+            };
+          });
+
+          allVideos = [...allVideos, ...storageVideos];
+          console.log('✅ Loaded storage videos:', storageVideos.length);
+        }
+      } catch (storageErr) {
+        console.log('⚠️ Storage API failed, videos from database only');
+      }
+
       setVideos(allVideos);
       
       // Initialize play order
@@ -135,237 +156,12 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
       
       setLoading(false);
       
-      // Start lazy loading storage videos
-      if (storageVideoPlaceholders.length > 0) {
-        startLazyLoading();
-      }
-      
     } catch (err) {
       console.error('Ошибка инициализации видео:', err);
       setError(err instanceof Error ? err.message : 'Ошибка загрузки');
       setLoading(false);
     }
   }, [data]);
-
-  // Count total storage files before loading
-  const countStorageFiles = async (): Promise<number> => {
-    console.log('📊 Counting storage files...');
-    
-    try {
-      // Try API first to get exact count
-      const { data: bucketData, error: bucketError } = await supabase
-        .storage
-        .from('annagavrilova')
-        .list('video', {
-          limit: 1000, // High limit to get all files
-          sortBy: { column: 'name', order: 'asc' }
-        });
-
-      if (!bucketError && bucketData && bucketData.length > 0) {
-        const videoFiles = bucketData.filter(file => 
-          file.name && 
-          file.name !== '.emptyFolderPlaceholder' && 
-          /\.(mp4|mov|avi|webm|ogg|mkv)$/i.test(file.name)
-        );
-        
-        const count = videoFiles.length;
-        console.log(`✅ API count: ${count} video files found`);
-        return count;
-      }
-    } catch (err) {
-      console.log('⚠️ API count failed, will estimate:', err);
-    }
-
-    // Fallback: Quick estimation by testing pattern
-    console.log('🔍 Estimating count by testing pattern...');
-    
-    const extensions = ['mp4', 'mov', 'avi', 'webm'];
-    const testPromises: Promise<boolean>[] = [];
-    
-    // Test first 50 possible files quickly
-    for (let i = 1; i <= 50; i++) {
-      const numberStr = i.toString().padStart(2, '0');
-      
-      for (const ext of extensions) {
-        const fileName = `video_${numberStr}.${ext}`;
-        const testUrl = `https://uvcywpcikjcdyzyosvhx.supabase.co/storage/v1/object/public/annagavrilova/video/${encodeURIComponent(fileName)}`;
-        
-        testPromises.push(
-          fetch(testUrl, { 
-            method: 'HEAD',
-            signal: AbortSignal.timeout(1000) // 1 second timeout per file
-          })
-          .then(response => response.ok)
-          .catch(() => false)
-        );
-      }
-    }
-    
-    try {
-      const results = await Promise.all(testPromises);
-      const estimatedCount = results.filter(Boolean).length;
-      console.log(`📈 Estimated count: ${estimatedCount} video files`);
-      return estimatedCount;
-    } catch (err) {
-      console.log('⚠️ Estimation failed, using default');
-      return 20; // Default estimate
-    }
-  };
-  const prepareStorageVideoPlaceholders = async (): Promise<Video[]> => {
-    const placeholders: Video[] = [];
-    
-    try {
-      // Try API first
-      const { data: bucketData, error: bucketError } = await supabase
-        .storage
-        .from('annagavrilova')
-        .list('video', {
-          limit: 100,
-          sortBy: { column: 'name', order: 'asc' }
-        });
-
-      if (!bucketError && bucketData && bucketData.length > 0) {
-        const videoFiles = bucketData.filter(file => 
-          file.name && 
-          file.name !== '.emptyFolderPlaceholder' && 
-          /\.(mp4|mov|avi|webm|ogg|mkv)$/i.test(file.name)
-        );
-
-        videoFiles.forEach((file, index) => {
-          const videoUrl = `https://uvcywpcikjcdyzyosvhx.supabase.co/storage/v1/object/public/annagavrilova/video/${encodeURIComponent(file.name)}`;
-          
-          placeholders.push({
-            id: `storage-video-${index}`,
-            url: videoUrl,
-            name: file.name.replace(/\.[^/.]+$/, ''),
-            type: 'storage',
-            loaded: false,
-            loading: false
-          });
-        });
-        
-        console.log(`📋 Prepared ${placeholders.length} storage video placeholders`);
-      } else {
-        // Fallback to pattern search
-        console.log('🔄 Using pattern search for storage videos');
-        
-        for (let i = 1; i <= Math.max(20, storageCount); i++) { // Use counted amount or default
-          const numberStr = i.toString().padStart(2, '0');
-          const extensions = ['mp4', 'mov', 'avi', 'webm'];
-          
-          for (const ext of extensions) {
-            const fileName = `video_${numberStr}.${ext}`;
-            const videoUrl = `https://uvcywpcikjcdyzyosvhx.supabase.co/storage/v1/object/public/annagavrilova/video/${encodeURIComponent(fileName)}`;
-            
-            placeholders.push({
-              id: `pattern-video-${i}-${ext}`,
-              url: videoUrl,
-              name: `video_${numberStr}`,
-              type: 'storage',
-              loaded: false,
-              loading: false
-            });
-          }
-        }
-      }
-    } catch (err) {
-      console.error('Error preparing storage placeholders:', err);
-    }
-
-    return placeholders;
-  };
-
-  // Lazy loading implementation
-  const startLazyLoading = useCallback(() => {
-    const loadNextBatch = async () => {
-      if (isLoadingMore) return;
-      
-      setIsLoadingMore(true);
-      const BATCH_SIZE = 3;
-      const unloadedVideos = videos.filter(v => v.type === 'storage' && !v.loaded && !v.loading);
-      const batch = unloadedVideos.slice(0, BATCH_SIZE);
-      
-      if (batch.length === 0) {
-        setIsLoadingMore(false);
-        return;
-      }
-      
-      console.log(`🔄 Loading batch of ${batch.length} videos...`);
-      
-      // Mark videos as loading
-      setVideos(prev => prev.map(v => 
-        batch.find(b => b.id === v.id) ? { ...v, loading: true } : v
-      ));
-      
-      const loadPromises = batch.map(async (video) => {
-        try {
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 5000);
-          
-          const response = await fetch(video.url, { 
-            method: 'HEAD',
-            signal: controller.signal,
-            cache: 'no-cache'
-          });
-          
-          clearTimeout(timeoutId);
-          
-          if (response.ok) {
-            console.log(`✅ Verified: ${video.name}`);
-            return { ...video, loaded: true, loading: false };
-          } else {
-            console.log(`❌ Not found: ${video.name}`);
-            return null; // Will be filtered out
-          }
-        } catch (error) {
-          console.log(`❌ Error loading: ${video.name}`);
-          return null; // Will be filtered out
-        }
-      });
-      
-      const results = await Promise.all(loadPromises);
-      const validVideos = results.filter(Boolean) as Video[];
-      
-      // Update videos state and progress
-      setVideos(prev => {
-        const updated = prev.map(v => {
-          const result = validVideos.find(r => r.id === v.id);
-          if (result) return result;
-          
-          // Remove failed videos
-          const failed = batch.find(b => b.id === v.id && !validVideos.find(r => r.id === v.id));
-          if (failed) return null;
-          
-          return v;
-        }).filter(Boolean) as Video[];
-        
-        return updated;
-      });
-      
-      const newLoadedCount = loadedCount + validVideos.length;
-      setLoadedCount(newLoadedCount);
-      
-      // Update progress percentage
-      const progress = totalStorageCount > 0 ? Math.round((newLoadedCount / totalStorageCount) * 100) : 0;
-      setLoadingProgress(progress);
-      
-      setIsLoadingMore(false);
-      
-      console.log(`📊 Progress: ${newLoadedCount}/${totalStorageCount} (${progress}%)`);
-      
-      // Continue loading if there are more videos and we found some in this batch
-      const stillHasUnloaded = videos.some(v => v.type === 'storage' && !v.loaded && !v.loading);
-      if (stillHasUnloaded && validVideos.length > 0 && newLoadedCount < totalStorageCount) {
-        loadingTimeoutRef.current = setTimeout(loadNextBatch, 2000); // Wait 2s between batches
-      } else {
-        console.log('🏁 Lazy loading completed');
-        setLoadingProgress(100);
-      }
-    };
-    
-    // Start first batch after a short delay
-    loadingTimeoutRef.current = setTimeout(loadNextBatch, 1000);
-  }, [videos, isLoadingMore]);
 
   // Playlist functions
   const shuffleArray = (array: number[]): number[] => {
@@ -533,7 +329,7 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
             <div className="aspect-video mb-6 rounded-lg overflow-hidden bg-slate-200 flex items-center justify-center">
               <div className="flex flex-col items-center space-y-4">
                 <div className="w-12 h-12 border-4 border-pink-500 border-t-transparent rounded-full animate-spin"></div>
-                <p className="text-slate-600 font-poiret">Инициализация плеера...</p>
+                <p className="text-slate-600 font-poiret">Загрузка плеера...</p>
               </div>
             </div>
           </GlassCard>
@@ -566,7 +362,6 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
     );
   }
 
-  const loadedVideos = videos.filter(v => v.loaded);
   const currentVideo = videos[currentVideoIndex];
 
   return (
@@ -578,42 +373,30 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
           </h2>
           <p className="text-slate-600 text-lg font-poiret">Работы в эфире</p>
           
-          {/* Statistics and Controls */}
-          <div className="flex flex-wrap justify-center items-center gap-4 mt-6">
-            <div className="flex space-x-4 text-sm text-slate-600 font-poiret">
-              <span>Загружено: {loadedVideos.length}</span>
-              <span>Всего: {videos.length}</span>
-              {totalStorageCount > 0 && (
-                <span>Из галереи: {loadedCount}/{totalStorageCount}</span>
-              )}
-              {isLoadingMore && (
-                <span className="text-blue-600">
-                  ⏳ Загрузка {loadingProgress}%
-                </span>
-              )}
-            </div>
-            
-            {/* View Mode Toggle */}
+          {/* View Mode Toggle */}
+          <div className="flex justify-center mt-6">
             <div className="flex bg-white/20 backdrop-blur-md border border-white/30 rounded-full p-1">
               <button
                 onClick={() => setViewMode('grid')}
-                className={`px-3 py-1 rounded-full text-sm font-poiret transition-all ${
+                className={`px-4 py-2 rounded-full text-sm font-poiret transition-all flex items-center space-x-2 ${
                   viewMode === 'grid' 
                     ? 'bg-white/40 text-slate-800' 
                     : 'text-slate-600 hover:text-slate-800'
                 }`}
               >
                 <Grid className="w-4 h-4" />
+                <span>Галерея</span>
               </button>
               <button
                 onClick={() => setViewMode('playlist')}
-                className={`px-3 py-1 rounded-full text-sm font-poiret transition-all ${
+                className={`px-4 py-2 rounded-full text-sm font-poiret transition-all flex items-center space-x-2 ${
                   viewMode === 'playlist' 
                     ? 'bg-white/40 text-slate-800' 
                     : 'text-slate-600 hover:text-slate-800'
                 }`}
               >
                 <List className="w-4 h-4" />
+                <span>Плейлист</span>
               </button>
             </div>
           </div>
@@ -625,7 +408,7 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
             {/* Main Player */}
             <div className="lg:col-span-2">
               <GlassCard className="p-6 animate-fade-in-up">
-                {currentVideo && currentVideo.loaded ? (
+                {currentVideo ? (
                   <div className="relative group">
                     {currentVideo.type === 'external' ? (
                       /* External Video */
@@ -755,7 +538,7 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
                       
                       <button
                         onClick={toggleRepeat}
-                        className={`p-2 rounded-full transition-all ${
+                        className={`p-2 rounded-full transition-all relative ${
                           repeatMode !== 'none' 
                             ? 'bg-purple-500 text-white' 
                             : 'bg-white/20 text-slate-600 hover:bg-white/30'
@@ -797,13 +580,13 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
               <GlassCard className="p-4 animate-fade-in-right">
                 <h3 className="font-poiret font-bold text-slate-800 mb-4 flex items-center">
                   <List className="w-4 h-4 mr-2" />
-                  Плейлист ({loadedVideos.length})
+                  Плейлист ({videos.length})
                 </h3>
                 
                 <div className="space-y-2 max-h-96 overflow-y-auto">
                   {playOrder.map((videoIndex, orderIndex) => {
                     const video = videos[videoIndex];
-                    if (!video || !video.loaded) return null;
+                    if (!video) return null;
                     
                     const isActive = videoIndex === currentVideoIndex;
                     
@@ -844,46 +627,12 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
                                 {video.type === 'storage' ? 'Галерея' : 
                                  video.type === 'external' ? video.platform : 'Встроено'}
                               </span>
-                              
-                              {video.isVertical && (
-                                <span className="inline-block px-2 py-0.5 bg-orange-100 text-orange-700 text-xs rounded-full font-poiret">
-                                  Вертикальное
-                                </span>
-                              )}
                             </div>
                           </div>
                         </div>
                       </button>
                     );
                   })}
-                  
-                  {/* Loading indicator for lazy loading */}
-                  {isLoadingMore && (
-                    <div className="p-3 text-center">
-                      <div className="flex flex-col items-center space-y-2">
-                        <div className="flex items-center space-x-2">
-                          <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
-                          <span className="text-sm font-poiret text-slate-600">
-                            Загрузка видео {loadingProgress}%
-                          </span>
-                        </div>
-                        
-                        {totalStorageCount > 0 && (
-                          <div className="w-full max-w-32">
-                            <div className="bg-slate-200 rounded-full h-1.5 overflow-hidden">
-                              <div 
-                                className="bg-blue-500 h-full transition-all duration-300 ease-out"
-                                style={{ width: `${loadingProgress}%` }}
-                              />
-                            </div>
-                            <div className="text-xs text-slate-500 mt-1 font-poiret">
-                              {loadedCount}/{totalStorageCount} файлов
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  )}
                 </div>
               </GlassCard>
             </div>
@@ -892,40 +641,6 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
           /* Grid Mode */
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {videos.map((video, index) => {
-              if (!video.loaded && !video.loading) {
-                return (
-                  <GlassCard key={video.id} className="p-4 animate-fade-in-left">
-                    <div className="aspect-video rounded-lg bg-slate-100 flex items-center justify-center">
-                      <div className="text-center text-slate-400">
-                        <div className="w-8 h-8 border-2 border-slate-300 border-t-transparent rounded-full animate-spin mx-auto mb-2"></div>
-                        <p className="text-sm font-poiret">Ожидание загрузки...</p>
-                      </div>
-                    </div>
-                    <div className="mt-3">
-                      <h3 className="font-poiret font-bold text-slate-600 truncate">{video.name}</h3>
-                    </div>
-                  </GlassCard>
-                );
-              }
-              
-              if (video.loading) {
-                return (
-                  <GlassCard key={video.id} className="p-4 animate-fade-in-left">
-                    <div className="aspect-video rounded-lg bg-slate-100 flex items-center justify-center">
-                      <div className="text-center text-slate-500">
-                        <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-2"></div>
-                        <p className="text-sm font-poiret">Проверка видео...</p>
-                      </div>
-                    </div>
-                    <div className="mt-3">
-                      <h3 className="font-poiret font-bold text-slate-700 truncate">{video.name}</h3>
-                    </div>
-                  </GlassCard>
-                );
-              }
-              
-              if (!video.loaded) return null;
-              
               // External videos (VK, YouTube, etc.)
               if (video.type === 'external') {
                 const embedUrl = convertVKVideoUrl(video.url);
@@ -978,14 +693,8 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
                         {video.name}
                       </h3>
                       
-                      <div className="flex flex-wrap gap-2">
-                        <span className="inline-block px-2 py-1 bg-blue-100 text-blue-700 text-xs rounded-full font-poiret">
-                          {video.platform}
-                        </span>
-                      </div>
-                      
                       {video.caption && (
-                        <p className="text-slate-600 font-poiret text-sm line-clamp-2">{video.caption}</p>
+                        <p className="text-slate-600 font-poiret text-sm">{video.caption}</p>
                       )}
                       
                       <a
@@ -1119,45 +828,13 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
                       </div>
 
                       {video.caption && (
-                        <p className="text-slate-600 font-poiret text-sm line-clamp-2">{video.caption}</p>
+                        <p className="text-slate-600 font-poiret text-sm">{video.caption}</p>
                       )}
                     </div>
                   </div>
                 </GlassCard>
               );
             })}
-          </div>
-        )}
-        
-        {/* Loading Progress at bottom */}
-        {isLoadingMore && totalStorageCount > 0 && (
-          <div className="mt-8 text-center">
-            <div className="inline-flex flex-col items-center space-y-3 bg-white/20 backdrop-blur-md border border-white/30 rounded-2xl px-8 py-6">
-              <div className="flex items-center space-x-3">
-                <div className="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
-                <span className="font-poiret text-slate-700 font-medium">
-                  Загружаем видео из галереи...
-                </span>
-              </div>
-              
-              <div className="w-64">
-                <div className="bg-slate-200 rounded-full h-2 overflow-hidden">
-                  <div 
-                    className="bg-gradient-to-r from-blue-500 to-purple-500 h-full transition-all duration-500 ease-out"
-                    style={{ width: `${loadingProgress}%` }}
-                  />
-                </div>
-                <div className="flex justify-between text-sm text-slate-600 mt-2 font-poiret">
-                  <span>{loadedCount} загружено</span>
-                  <span>{loadingProgress}%</span>
-                  <span>{totalStorageCount} всего</span>
-                </div>
-              </div>
-              
-              <p className="text-xs text-slate-500 font-poiret">
-                Видео проверяются пакетами для оптимальной производительности
-              </p>
-            </div>
           </div>
         )}
       </div>
