@@ -82,6 +82,17 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
         try {
           console.log('Fetching videos from storage...');
           
+          // Сначала проверим, какие папки есть в корне bucket
+          const { data: rootData, error: rootError } = await supabase
+            .storage
+            .from('annagavrilova')
+            .list('', {
+              limit: 100
+            });
+          
+          console.log('Root bucket contents:', { rootData, rootError });
+          
+          // Теперь попробуем получить содержимое папки video
           const { data: bucketData, error: bucketError } = await supabase
             .storage
             .from('annagavrilova')
@@ -94,7 +105,18 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
 
           if (bucketError) {
             console.error('Storage error:', bucketError);
-            throw bucketError;
+            
+            // Попробуем альтернативный путь без папки
+            console.log('Trying to list files without folder...');
+            const { data: allData, error: allError } = await supabase
+              .storage
+              .from('annagavrilova')
+              .list('', {
+                limit: 100,
+                search: 'video'
+              });
+            
+            console.log('Alternative search result:', { allData, allError });
           }
 
           if (bucketData && bucketData.length > 0) {
@@ -130,6 +152,33 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
             console.log('Created storage videos:', storageVideos);
           } else {
             console.log('No files found in storage bucket');
+            
+            // Попробуем прямой доступ к известному файлу
+            console.log('Testing direct access to known file...');
+            const testUrl = 'https://uvcywpcikjcdyzyosvhx.supabase.co/storage/v1/object/public/annagavrilova/video/video_2025-07-01_20-05-03.mp4';
+            
+            try {
+              const response = await fetch(testUrl, { method: 'HEAD' });
+              console.log('Direct file access test:', {
+                url: testUrl,
+                status: response.status,
+                statusText: response.statusText,
+                headers: Object.fromEntries(response.headers.entries())
+              });
+              
+              if (response.ok) {
+                console.log('File exists! Adding as manual entry...');
+                const manualVideo: Video = {
+                  id: 'manual-video-1',
+                  url: testUrl,
+                  name: 'video_2025-07-01_20-05-03',
+                  type: 'storage'
+                };
+                allVideos = [...allVideos, manualVideo];
+              }
+            } catch (fetchError) {
+              console.error('Direct file access failed:', fetchError);
+            }
           }
         } catch (storageErr) {
           console.error('Storage error details:', storageErr);
@@ -156,19 +205,6 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
 
           allVideos = [...allVideos, ...databaseVideos];
           console.log('Found database videos:', databaseVideos);
-        }
-
-        // 3. Тестовое видео для отладки (добавляем конкретный файл)
-        if (allVideos.length === 0) {
-          console.log('No videos found, adding test video');
-          const testVideo: Video = {
-            id: 'test-video-1',
-            url: 'https://uvcywpcikjcdyzyosvhx.supabase.co/storage/v1/object/public/annagavrilova/video/video_2025-07-01_20-05-03.mp4',
-            name: 'Тестовое видео',
-            type: 'storage'
-          };
-          allVideos = [testVideo];
-          console.log('Added test video:', testVideo);
         }
 
         console.log('All videos combined:', allVideos);
