@@ -103,23 +103,9 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
 
           console.log('Storage response:', { bucketData, bucketError });
 
-          if (bucketError) {
-            console.error('Storage error:', bucketError);
-            
-            // Попробуем альтернативный путь без папки
-            console.log('Trying to list files without folder...');
-            const { data: allData, error: allError } = await supabase
-              .storage
-              .from('annagavrilova')
-              .list('', {
-                limit: 100,
-                search: 'video'
-              });
-            
-            console.log('Alternative search result:', { allData, allError });
-          }
+          let foundStorageVideos = false;
 
-          if (bucketData && bucketData.length > 0) {
+          if (!bucketError && bucketData && bucketData.length > 0) {
             console.log('Raw bucket data:', bucketData);
             
             const videoFiles = bucketData.filter(file => {
@@ -131,53 +117,131 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
 
             console.log('Filtered video files:', videoFiles);
 
-            const storageVideos: Video[] = videoFiles.map((file, index) => {
-              const videoUrl = `https://uvcywpcikjcdyzyosvhx.supabase.co/storage/v1/object/public/annagavrilova/video/${encodeURIComponent(file.name)}`;
-              console.log('Creating video object:', {
-                id: `storage-video-${index}`,
-                url: videoUrl,
-                name: file.name.replace(/\.[^/.]+$/, ''),
-                originalFileName: file.name
-              });
-              
-              return {
-                id: `storage-video-${index}`,
-                url: videoUrl,
-                name: file.name.replace(/\.[^/.]+$/, ''),
-                type: 'storage'
-              };
-            });
-
-            allVideos = [...allVideos, ...storageVideos];
-            console.log('Created storage videos:', storageVideos);
-          } else {
-            console.log('No files found in storage bucket');
-            
-            // Попробуем прямой доступ к известному файлу
-            console.log('Testing direct access to known file...');
-            const testUrl = 'https://uvcywpcikjcdyzyosvhx.supabase.co/storage/v1/object/public/annagavrilova/video/video_2025-07-01_20-05-03.mp4';
-            
-            try {
-              const response = await fetch(testUrl, { method: 'HEAD' });
-              console.log('Direct file access test:', {
-                url: testUrl,
-                status: response.status,
-                statusText: response.statusText,
-                headers: Object.fromEntries(response.headers.entries())
-              });
-              
-              if (response.ok) {
-                console.log('File exists! Adding as manual entry...');
-                const manualVideo: Video = {
-                  id: 'manual-video-1',
-                  url: testUrl,
-                  name: 'video_2025-07-01_20-05-03',
+            if (videoFiles.length > 0) {
+              const storageVideos: Video[] = videoFiles.map((file, index) => {
+                const videoUrl = `https://uvcywpcikjcdyzyosvhx.supabase.co/storage/v1/object/public/annagavrilova/video/${encodeURIComponent(file.name)}`;
+                console.log('Creating video object:', {
+                  id: `storage-video-${index}`,
+                  url: videoUrl,
+                  name: file.name.replace(/\.[^/.]+$/, ''),
+                  originalFileName: file.name
+                });
+                
+                return {
+                  id: `storage-video-${index}`,
+                  url: videoUrl,
+                  name: file.name.replace(/\.[^/.]+$/, ''),
                   type: 'storage'
                 };
-                allVideos = [...allVideos, manualVideo];
+              });
+
+              allVideos = [...allVideos, ...storageVideos];
+              console.log('Created storage videos:', storageVideos);
+              foundStorageVideos = true;
+            }
+          }
+
+                      // Если не удалось получить список файлов через API, попробуем альтернативный подход
+          if (!foundStorageVideos) {
+            console.log('No files found via API, trying alternative approaches...');
+            
+            // Метод 1: Попробуем известные видеофайлы
+            const knownVideoFiles = [
+              'video_2025-07-01_20-05-03.mp4',
+              // Можно добавить другие известные файлы
+            ];
+
+            // Метод 2: Попробуем сгенерировать возможные имена файлов
+            const possibleVideoFiles = [
+              ...knownVideoFiles,
+              // Типичные паттерны названий видео
+              'video.mp4',
+              'video1.mp4',
+              'video2.mp4',
+              'video3.mp4',
+              'sample.mp4',
+              'demo.mp4',
+              'portfolio.mp4',
+              'showreel.mp4',
+              'reel.mp4',
+              // Паттерны с датами
+              'video_2024.mp4',
+              'video_2025.mp4',
+              // Другие возможные расширения
+              'video.mov',
+              'video.webm',
+              'video.avi'
+            ];
+
+            const workingVideos: Video[] = [];
+
+            console.log('Testing possible video files...');
+            
+            // Ограничиваем количество одновременных запросов
+            const batchSize = 5;
+            for (let i = 0; i < possibleVideoFiles.length; i += batchSize) {
+              const batch = possibleVideoFiles.slice(i, i + batchSize);
+              
+              await Promise.allSettled(
+                batch.map(async (fileName) => {
+                  const testUrl = `https://uvcywpcikjcdyzyosvhx.supabase.co/storage/v1/object/public/annagavrilova/video/${encodeURIComponent(fileName)}`;
+                  
+                  try {
+                    const response = await fetch(testUrl, { 
+                      method: 'HEAD',
+                      cache: 'no-cache'
+                    });
+                    
+                    if (response.ok) {
+                      console.log(`✅ Found video file: ${fileName}`);
+                      const video: Video = {
+                        id: `manual-video-${workingVideos.length}`,
+                        url: testUrl,
+                        name: fileName.replace(/\.[^/.]+$/, ''),
+                        type: 'storage'
+                      };
+                      workingVideos.push(video);
+                    } else {
+                      console.log(`❌ File not found: ${fileName} (${response.status})`);
+                    }
+                  } catch (fetchError) {
+                    console.log(`❌ Error accessing ${fileName}:`, fetchError.message);
+                  }
+                })
+              );
+              
+              // Небольшая пауза между батчами
+              if (i + batchSize < possibleVideoFiles.length) {
+                await new Promise(resolve => setTimeout(resolve, 100));
               }
-            } catch (fetchError) {
-              console.error('Direct file access failed:', fetchError);
+            }
+
+            if (workingVideos.length > 0) {
+              allVideos = [...allVideos, ...workingVideos];
+              console.log(`🎉 Successfully found ${workingVideos.length} video files:`, workingVideos);
+            } else {
+              console.log('❌ No working video files found');
+              
+              // Показываем инструкцию
+              console.log(`
+🎥 КАК ДОБАВИТЬ ВИДЕО:
+
+1. ЧЕРЕЗ SUPABASE DASHBOARD:
+   - Откройте https://supabase.com/dashboard
+   - Перейдите в проект annagavrilova
+   - Storage > Buckets > annagavrilova > video/
+   - Загрузите видеофайлы
+   - Убедитесь что bucket публичный
+
+2. ПРОВЕРЬТЕ НАСТРОЙКИ RLS:
+   - Bucket должен быть public
+   - Или настройте правильные RLS политики
+
+3. ДОБАВЬТЕ ФАЙЛЫ В КОД:
+   - Добавьте имена ваших видеофайлов в массив knownVideoFiles
+
+Поддерживаемые форматы: .mp4, .mov, .avi, .webm, .ogg, .mkv
+              `);
             }
           }
         } catch (storageErr) {
