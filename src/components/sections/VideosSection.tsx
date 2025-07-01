@@ -1,4 +1,34 @@
-import React, { useState, useEffect, useRef } from 'react';
+// 1. Загружаем видео из Supabase Storage
+        try {
+          console.log('Fetching videos from storage...');
+          
+          // Пробуем получить содержимое папки video
+          const { data: bucketData, error: bucketError } = await supabase
+            .storage
+            .from('annagavrilova')
+            .list('video', {
+              limit: 100,
+              sortBy: { column: 'name', order: 'asc' }
+            });
+
+          console.log('Storage API response:', { 
+            success: !bucketError, 
+            error: bucketError?.message,
+            filesCount: bucketData?.length || 0 
+          });
+
+          let foundStorageVideos = false;
+
+          if (!bucketError && bucketData && bucketData.length > 0) {
+            const videoFiles = bucketData.filter(file => {
+              return file.name && 
+                     file.name !== '.emptyFolderPlaceholder' && 
+                     /\.(mp4|mov|avi|webm|ogg|mkv)$/i.test(file.name);
+            });
+
+            if (videoFiles.length > 0) {
+              const storageVideos: Video[] = videoFiles.map((file, index) => {
+                const videoUrl = `https://uimport React, { useState, useEffect, useRef } from 'react';
 import { GlassCard } from '../GlassCard';
 import { MediaItem } from '../../types';
 import { Play, Pause, Volume2, VolumeX, Maximize, Download, ExternalLink } from 'lucide-react';
