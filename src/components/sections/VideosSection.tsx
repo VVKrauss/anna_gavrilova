@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { GlassCard } from '../GlassCard';
 import { MediaItem } from '../../types';
-import { Play, Pause, Volume2, VolumeX, Maximize, Download, ExternalLink } from 'lucide-react';
+import { Play, Pause, Volume2, VolumeX, Maximize, Download, ExternalLink, SkipForward, SkipBack, Shuffle, Repeat, List, Grid } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 
 interface Video {
@@ -12,17 +12,21 @@ interface Video {
   isVertical?: boolean;
   type: 'storage' | 'embedded' | 'external';
   platform?: string;
+  loaded?: boolean;
+  loading?: boolean;
+  thumbnail?: string;
 }
 
 interface VideosSectionProps {
   data?: MediaItem[];
 }
 
+type ViewMode = 'grid' | 'playlist';
+type RepeatMode = 'none' | 'one' | 'all';
+
 // Function to convert VK video URL to embed URL
 const convertVKVideoUrl = (url: string): string => {
-  if (!url || typeof url !== 'string') {
-    return '';
-  }
+  if (!url || typeof url !== 'string') return '';
   
   const vkVideoMatch = url.match(/vk\.com\/video(-?\d+)_(\d+)/);
   if (vkVideoMatch) {
@@ -31,18 +35,13 @@ const convertVKVideoUrl = (url: string): string => {
     return `https://vk.com/video_ext.php?oid=${oid}&id=${id}&hd=2`;
   }
   
-  if (url.includes('video_ext.php')) {
-    return url;
-  }
-  
+  if (url.includes('video_ext.php')) return url;
   return url;
 };
 
 // Function to get platform name from URL
 const getPlatformName = (url: string): string => {
-  if (!url || typeof url !== 'string') {
-    return 'Видео';
-  }
+  if (!url || typeof url !== 'string') return 'Видео';
   
   if (url.includes('vk.com')) return 'VK';
   if (url.includes('youtube.com') || url.includes('youtu.be')) return 'YouTube';
@@ -64,291 +63,354 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
   const [videos, setVideos] = useState<Video[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [currentVideo, setCurrentVideo] = useState<string | null>(null);
-  const [isPlaying, setIsPlaying] = useState<{ [key: string]: boolean }>({});
-  const [isMuted, setIsMuted] = useState<{ [key: string]: boolean }>({});
-  const [currentTime, setCurrentTime] = useState<{ [key: string]: number }>({});
-  const [duration, setDuration] = useState<{ [key: string]: number }>({});
+  
+  // Playback state
+  const [currentVideoIndex, setCurrentVideoIndex] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [isMuted, setIsMuted] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [volume, setVolume] = useState(1);
+  
+  // Playlist state
+  const [viewMode, setViewMode] = useState<ViewMode>('grid');
+  const [repeatMode, setRepeatMode] = useState<RepeatMode>('none');
+  const [isShuffled, setIsShuffled] = useState(false);
+  const [playOrder, setPlayOrder] = useState<number[]>([]);
+  const [autoplay, setAutoplay] = useState(false);
+  
+  // Lazy loading state
+  const [loadedCount, setLoadedCount] = useState(0);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const loadingTimeoutRef = useRef<NodeJS.Timeout>();
   
   const videoRefs = useRef<{ [key: string]: HTMLVideoElement }>({});
+  const observerRef = useRef<IntersectionObserver>();
 
-  useEffect(() => {
-    const fetchVideos = async () => {
-      try {
-        setLoading(true);
-        let allVideos: Video[] = [];
-        
-        // 1. Загружаем видео из Supabase Storage
-        try {
-          console.log('🎥 Fetching videos from storage...');
+  // Initialize embedded videos first, then lazy load storage videos
+  const initializeVideos = useCallback(async () => {
+    try {
+      setLoading(true);
+      let initialVideos: Video[] = [];
+      
+      // 1. First load embedded/external videos (instant)
+      if (data && Array.isArray(data)) {
+        const validDatabaseVideos = data.filter(video => 
+          video && video.url && typeof video.url === 'string' && video.url.trim() !== ''
+        );
+
+        const databaseVideos: Video[] = validDatabaseVideos.map((video, index) => {
+          const isExternal = isExternalVideo(video.url);
           
-          // Пробуем получить содержимое папки video через API
-          const { data: bucketData, error: bucketError } = await supabase
-            .storage
-            .from('annagavrilova')
-            .list('video', {
-              limit: 100,
-              sortBy: { column: 'name', order: 'asc' }
-            });
+          return {
+            id: video.id || `db-video-${index}`,
+            url: video.url,
+            name: video.title || 'Без названия',
+            caption: video.caption,
+            type: isExternal ? 'external' : 'embedded',
+            platform: isExternal ? getPlatformName(video.url) : undefined,
+            loaded: true // Embedded videos are considered loaded
+          };
+        });
 
-          let foundStorageVideos = false;
-
-          if (!bucketError && bucketData && bucketData.length > 0) {
-            const videoFiles = bucketData.filter(file => {
-              return file.name && 
-                     file.name !== '.emptyFolderPlaceholder' && 
-                     /\.(mp4|mov|avi|webm|ogg|mkv)$/i.test(file.name);
-            });
-
-            if (videoFiles.length > 0) {
-              const storageVideos: Video[] = videoFiles.map((file, index) => {
-                const videoUrl = `https://uvcywpcikjcdyzyosvhx.supabase.co/storage/v1/object/public/annagavrilova/video/${encodeURIComponent(file.name)}`;
-                
-                return {
-                  id: `storage-video-${index}`,
-                  url: videoUrl,
-                  name: file.name.replace(/\.[^/.]+$/, ''),
-                  type: 'storage'
-                };
-              });
-
-              allVideos = [...allVideos, ...storageVideos];
-              console.log(`✅ Found ${storageVideos.length} videos via API:`, storageVideos.map(v => v.name));
-              foundStorageVideos = true;
-            }
-          }
-
-          // Если API не сработал, используем поиск по шаблону video_NN.*
-          if (!foundStorageVideos) {
-            console.log('🔄 API failed, searching by pattern video_NN.*');
-            
-            // Генерируем имена файлов по шаблону video_01, video_02, etc.
-            const videoExtensions = ['mp4', 'mov', 'avi', 'webm', 'ogg', 'mkv'];
-            const possibleFiles: string[] = [];
-            
-            // Проверяем video_01 до video_50 (можно изменить диапазон)
-            for (let i = 1; i <= 50; i++) {
-              const numberStr = i.toString().padStart(2, '0'); // 01, 02, 03, ...
-              
-              for (const ext of videoExtensions) {
-                possibleFiles.push(`video_${numberStr}.${ext}`);
-              }
-            }
-
-            // Добавляем также без ведущего нуля (video_1, video_2, etc.)
-            for (let i = 1; i <= 50; i++) {
-              for (const ext of videoExtensions) {
-                possibleFiles.push(`video_${i}.${ext}`);
-              }
-            }
-
-            // Добавляем другие возможные паттерны
-            const additionalPatterns = [
-              'video.mp4', 'video.mov', 'video.avi', 'video.webm',
-              'video_2025-07-01_20-05-03.mp4', // известный файл
-            ];
-
-            const allFiles = [...possibleFiles, ...additionalPatterns];
-            const workingVideos: Video[] = [];
-
-            console.log(`🔍 Testing ${allFiles.length} files with pattern video_NN.*`);
-            
-            // Проверяем файлы батчами
-            const batchSize = 5;
-            let testedCount = 0;
-            
-            for (let i = 0; i < allFiles.length; i += batchSize) {
-              const batch = allFiles.slice(i, i + batchSize);
-              
-              const results = await Promise.allSettled(
-                batch.map(async (fileName) => {
-                  const testUrl = `https://uvcywpcikjcdyzyosvhx.supabase.co/storage/v1/object/public/annagavrilova/video/${encodeURIComponent(fileName)}`;
-                  
-                  try {
-                    const controller = new AbortController();
-                    const timeoutId = setTimeout(() => controller.abort(), 2000);
-                    
-                    const response = await fetch(testUrl, { 
-                      method: 'HEAD',
-                      signal: controller.signal,
-                      cache: 'no-cache'
-                    });
-                    
-                    clearTimeout(timeoutId);
-                    
-                    if (response.ok) {
-                      return {
-                        fileName,
-                        url: testUrl,
-                        success: true
-                      };
-                    }
-                    return { fileName, success: false };
-                  } catch (error) {
-                    return { fileName, success: false };
-                  }
-                })
-              );
-              
-              // Обрабатываем результаты
-              results.forEach((result) => {
-                testedCount++;
-                if (result.status === 'fulfilled' && result.value.success) {
-                  const video: Video = {
-                    id: `pattern-video-${workingVideos.length}`,
-                    url: result.value.url,
-                    name: result.value.fileName.replace(/\.[^/.]+$/, ''),
-                    type: 'storage'
-                  };
-                  workingVideos.push(video);
-                  console.log(`✅ Found: ${result.value.fileName}`);
-                }
-              });
-              
-              // Показываем прогресс каждые 25 файлов
-              if (testedCount % 25 === 0 || testedCount === allFiles.length) {
-                console.log(`📊 Progress: ${testedCount}/${allFiles.length} tested | Found: ${workingVideos.length} videos`);
-              }
-              
-              // Пауза между батчами
-              if (i + batchSize < allFiles.length) {
-                await new Promise(resolve => setTimeout(resolve, 100));
-              }
-            }
-
-            if (workingVideos.length > 0) {
-              // Сортируем найденные видео по имени
-              workingVideos.sort((a, b) => a.name.localeCompare(b.name));
-              
-              allVideos = [...allVideos, ...workingVideos];
-              console.log(`🎉 Found ${workingVideos.length} videos by pattern!`);
-              console.log('📋 Video list:', workingVideos.map(v => v.name));
-            } else {
-              console.log('❌ No videos found with pattern video_NN.*');
-              console.log(`
-🎥 ДОБАВЬТЕ ВИДЕО В STORAGE:
-
-1. ОТКРОЙТЕ SUPABASE DASHBOARD:
-   - https://supabase.com/dashboard
-   - Проект > Storage > annagavrilova > video/
-
-2. ЗАГРУЗИТЕ ФАЙЛЫ С ИМЕНАМИ:
-   - video_01.mp4
-   - video_02.mp4  
-   - video_03.mp4
-   - и т.д.
-
-3. ПОДДЕРЖИВАЕМЫЕ РАСШИРЕНИЯ:
-   - .mp4, .mov, .avi, .webm, .ogg, .mkv
-
-4. ТЕКУЩИЙ URL ПАТТЕРН:
-   https://uvcywpcikjcdyzyosvhx.supabase.co/storage/v1/object/public/annagavrilova/video/video_01.mp4
-
-Код автоматически найдет файлы video_01 до video_50 с любым поддерживаемым расширением!
-              `);
-            }
-          }
-        } catch (storageErr) {
-          console.error('💥 Storage error:', storageErr);
-        }
-
-        // 2. Добавляем видео из базы данных (встроенные и внешние)
-        if (data && Array.isArray(data)) {
-          const validDatabaseVideos = data.filter(video => 
-            video && video.url && typeof video.url === 'string' && video.url.trim() !== ''
-          );
-
-          const databaseVideos: Video[] = validDatabaseVideos.map((video, index) => {
-            const isExternal = isExternalVideo(video.url);
-            
-            return {
-              id: video.id || `db-video-${index}`,
-              url: video.url,
-              name: video.title || 'Без названия',
-              caption: video.caption,
-              type: isExternal ? 'external' : 'embedded',
-              platform: isExternal ? getPlatformName(video.url) : undefined
-            };
-          });
-
-          allVideos = [...allVideos, ...databaseVideos];
-          console.log('Found database videos:', databaseVideos);
-        }
-
-        console.log('All videos combined:', allVideos);
-        setVideos(allVideos);
-      } catch (err) {
-        console.error('Ошибка загрузки видео:', err);
-        setError(err instanceof Error ? err.message : 'Ошибка загрузки');
-      } finally {
-        setLoading(false);
+        initialVideos = databaseVideos;
+        console.log('✅ Loaded embedded/external videos:', databaseVideos.length);
       }
-    };
 
-    fetchVideos();
+      // 2. Then prepare storage video placeholders (will be lazy loaded)
+      const storageVideoPlaceholders = await prepareStorageVideoPlaceholders();
+      
+      const allVideos = [...initialVideos, ...storageVideoPlaceholders];
+      setVideos(allVideos);
+      
+      // Initialize play order
+      const order = Array.from({ length: allVideos.length }, (_, i) => i);
+      setPlayOrder(order);
+      
+      setLoading(false);
+      
+      // Start lazy loading storage videos
+      if (storageVideoPlaceholders.length > 0) {
+        startLazyLoading();
+      }
+      
+    } catch (err) {
+      console.error('Ошибка инициализации видео:', err);
+      setError(err instanceof Error ? err.message : 'Ошибка загрузки');
+      setLoading(false);
+    }
   }, [data]);
 
-  // Определяем ориентацию видео после загрузки метаданных (только для storage видео)
-  const handleLoadedMetadata = (videoId: string) => {
-    const video = videoRefs.current[videoId];
-    if (video) {
-      const isVertical = video.videoHeight > video.videoWidth;
+  // Prepare storage video placeholders
+  const prepareStorageVideoPlaceholders = async (): Promise<Video[]> => {
+    const placeholders: Video[] = [];
+    
+    try {
+      // Try API first
+      const { data: bucketData, error: bucketError } = await supabase
+        .storage
+        .from('annagavrilova')
+        .list('video', {
+          limit: 100,
+          sortBy: { column: 'name', order: 'asc' }
+        });
+
+      if (!bucketError && bucketData && bucketData.length > 0) {
+        const videoFiles = bucketData.filter(file => 
+          file.name && 
+          file.name !== '.emptyFolderPlaceholder' && 
+          /\.(mp4|mov|avi|webm|ogg|mkv)$/i.test(file.name)
+        );
+
+        videoFiles.forEach((file, index) => {
+          const videoUrl = `https://uvcywpcikjcdyzyosvhx.supabase.co/storage/v1/object/public/annagavrilova/video/${encodeURIComponent(file.name)}`;
+          
+          placeholders.push({
+            id: `storage-video-${index}`,
+            url: videoUrl,
+            name: file.name.replace(/\.[^/.]+$/, ''),
+            type: 'storage',
+            loaded: false,
+            loading: false
+          });
+        });
+        
+        console.log(`📋 Prepared ${placeholders.length} storage video placeholders`);
+      } else {
+        // Fallback to pattern search
+        console.log('🔄 Using pattern search for storage videos');
+        
+        for (let i = 1; i <= 20; i++) { // Reduced initial search
+          const numberStr = i.toString().padStart(2, '0');
+          const extensions = ['mp4', 'mov', 'avi', 'webm'];
+          
+          for (const ext of extensions) {
+            const fileName = `video_${numberStr}.${ext}`;
+            const videoUrl = `https://uvcywpcikjcdyzyosvhx.supabase.co/storage/v1/object/public/annagavrilova/video/${encodeURIComponent(fileName)}`;
+            
+            placeholders.push({
+              id: `pattern-video-${i}-${ext}`,
+              url: videoUrl,
+              name: `video_${numberStr}`,
+              type: 'storage',
+              loaded: false,
+              loading: false
+            });
+          }
+        }
+      }
+    } catch (err) {
+      console.error('Error preparing storage placeholders:', err);
+    }
+
+    return placeholders;
+  };
+
+  // Lazy loading implementation
+  const startLazyLoading = useCallback(() => {
+    const loadNextBatch = async () => {
+      if (isLoadingMore) return;
+      
+      setIsLoadingMore(true);
+      const BATCH_SIZE = 3;
+      const unloadedVideos = videos.filter(v => v.type === 'storage' && !v.loaded && !v.loading);
+      const batch = unloadedVideos.slice(0, BATCH_SIZE);
+      
+      if (batch.length === 0) {
+        setIsLoadingMore(false);
+        return;
+      }
+      
+      console.log(`🔄 Loading batch of ${batch.length} videos...`);
+      
+      // Mark videos as loading
       setVideos(prev => prev.map(v => 
-        v.id === videoId ? { ...v, isVertical } : v
+        batch.find(b => b.id === v.id) ? { ...v, loading: true } : v
       ));
-      setDuration(prev => ({ ...prev, [videoId]: video.duration }));
+      
+      const loadPromises = batch.map(async (video) => {
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 5000);
+          
+          const response = await fetch(video.url, { 
+            method: 'HEAD',
+            signal: controller.signal,
+            cache: 'no-cache'
+          });
+          
+          clearTimeout(timeoutId);
+          
+          if (response.ok) {
+            console.log(`✅ Verified: ${video.name}`);
+            return { ...video, loaded: true, loading: false };
+          } else {
+            console.log(`❌ Not found: ${video.name}`);
+            return null; // Will be filtered out
+          }
+        } catch (error) {
+          console.log(`❌ Error loading: ${video.name}`);
+          return null; // Will be filtered out
+        }
+      });
+      
+      const results = await Promise.all(loadPromises);
+      const validVideos = results.filter(Boolean) as Video[];
+      
+      // Update videos state
+      setVideos(prev => {
+        const updated = prev.map(v => {
+          const result = validVideos.find(r => r.id === v.id);
+          if (result) return result;
+          
+          // Remove failed videos
+          const failed = batch.find(b => b.id === v.id && !validVideos.find(r => r.id === v.id));
+          if (failed) return null;
+          
+          return v;
+        }).filter(Boolean) as Video[];
+        
+        return updated;
+      });
+      
+      setLoadedCount(prev => prev + validVideos.length);
+      setIsLoadingMore(false);
+      
+      // Continue loading if there are more videos
+      const stillHasUnloaded = videos.some(v => v.type === 'storage' && !v.loaded && !v.loading);
+      if (stillHasUnloaded && validVideos.length > 0) {
+        loadingTimeoutRef.current = setTimeout(loadNextBatch, 2000); // Wait 2s between batches
+      }
+    };
+    
+    // Start first batch after a short delay
+    loadingTimeoutRef.current = setTimeout(loadNextBatch, 1000);
+  }, [videos, isLoadingMore]);
+
+  // Playlist functions
+  const shuffleArray = (array: number[]): number[] => {
+    const shuffled = [...array];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    return shuffled;
+  };
+
+  const toggleShuffle = () => {
+    const newShuffled = !isShuffled;
+    setIsShuffled(newShuffled);
+    
+    if (newShuffled) {
+      const shuffled = shuffleArray(Array.from({ length: videos.length }, (_, i) => i));
+      setPlayOrder(shuffled);
+    } else {
+      const normal = Array.from({ length: videos.length }, (_, i) => i);
+      setPlayOrder(normal);
     }
   };
 
-  const togglePlay = (videoId: string) => {
-    const video = videoRefs.current[videoId];
+  const toggleRepeat = () => {
+    const modes: RepeatMode[] = ['none', 'one', 'all'];
+    const currentIndex = modes.indexOf(repeatMode);
+    const nextMode = modes[(currentIndex + 1) % modes.length];
+    setRepeatMode(nextMode);
+  };
+
+  const playVideo = (index: number) => {
+    const video = videos[index];
+    if (!video || !video.loaded || video.type === 'external') return;
+    
+    // Pause current video
+    const currentVideo = videoRefs.current[videos[currentVideoIndex]?.id];
+    if (currentVideo) {
+      currentVideo.pause();
+    }
+    
+    setCurrentVideoIndex(index);
+    
+    // Play new video
+    setTimeout(() => {
+      const newVideo = videoRefs.current[video.id];
+      if (newVideo) {
+        newVideo.play();
+        setIsPlaying(true);
+      }
+    }, 100);
+  };
+
+  const playNext = () => {
+    const currentOrderIndex = playOrder.indexOf(currentVideoIndex);
+    let nextIndex = currentOrderIndex + 1;
+    
+    if (nextIndex >= playOrder.length) {
+      if (repeatMode === 'all') {
+        nextIndex = 0;
+      } else {
+        setIsPlaying(false);
+        return;
+      }
+    }
+    
+    playVideo(playOrder[nextIndex]);
+  };
+
+  const playPrevious = () => {
+    const currentOrderIndex = playOrder.indexOf(currentVideoIndex);
+    let prevIndex = currentOrderIndex - 1;
+    
+    if (prevIndex < 0) {
+      if (repeatMode === 'all') {
+        prevIndex = playOrder.length - 1;
+      } else {
+        return;
+      }
+    }
+    
+    playVideo(playOrder[prevIndex]);
+  };
+
+  const togglePlayPause = () => {
+    const video = videoRefs.current[videos[currentVideoIndex]?.id];
     if (!video) return;
 
-    // Останавливаем все другие видео
-    Object.keys(videoRefs.current).forEach(id => {
-      if (id !== videoId && videoRefs.current[id]) {
-        videoRefs.current[id].pause();
-        setIsPlaying(prev => ({ ...prev, [id]: false }));
-      }
-    });
-
-    if (isPlaying[videoId]) {
+    if (isPlaying) {
       video.pause();
-      setIsPlaying(prev => ({ ...prev, [videoId]: false }));
-      setCurrentVideo(null);
+      setIsPlaying(false);
     } else {
       video.play();
-      setIsPlaying(prev => ({ ...prev, [videoId]: true }));
-      setCurrentVideo(videoId);
+      setIsPlaying(true);
     }
   };
 
-  const toggleMute = (videoId: string) => {
-    const video = videoRefs.current[videoId];
-    if (!video) return;
-
-    video.muted = !video.muted;
-    setIsMuted(prev => ({ ...prev, [videoId]: video.muted }));
+  const handleVideoEnd = () => {
+    if (repeatMode === 'one') {
+      const video = videoRefs.current[videos[currentVideoIndex]?.id];
+      if (video) {
+        video.currentTime = 0;
+        video.play();
+      }
+    } else if (autoplay) {
+      playNext();
+    } else {
+      setIsPlaying(false);
+    }
   };
 
-  const handleTimeUpdate = (videoId: string) => {
-    const video = videoRefs.current[videoId];
+  const handleTimeUpdate = () => {
+    const video = videoRefs.current[videos[currentVideoIndex]?.id];
     if (video) {
-      setCurrentTime(prev => ({ ...prev, [videoId]: video.currentTime }));
+      setCurrentTime(video.currentTime);
+      setDuration(video.duration || 0);
     }
   };
 
-  const handleSeek = (videoId: string, time: number) => {
-    const video = videoRefs.current[videoId];
+  const handleSeek = (time: number) => {
+    const video = videoRefs.current[videos[currentVideoIndex]?.id];
     if (video) {
       video.currentTime = time;
-      setCurrentTime(prev => ({ ...prev, [videoId]: time }));
+      setCurrentTime(time);
     }
-  };
-
-  const handleVideoEnd = (videoId: string) => {
-    setIsPlaying(prev => ({ ...prev, [videoId]: false }));
-    setCurrentVideo(null);
   };
 
   const formatTime = (time: number) => {
@@ -357,246 +419,24 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
     return `${minutes}:${seconds.toString().padStart(2, '0')}`;
   };
 
-  const handleFullscreen = (videoId: string) => {
-    const video = videoRefs.current[videoId];
-    if (video) {
-      if (video.requestFullscreen) {
-        video.requestFullscreen();
-      }
-    }
-  };
-
-  // Рендер для внешнего видео (VK, YouTube, etc.)
-  const renderExternalVideo = (video: Video) => {
-    const embedUrl = convertVKVideoUrl(video.url);
+  // Initialize on mount
+  useEffect(() => {
+    initializeVideos();
     
-    return (
-      <GlassCard key={video.id} className="p-6 animate-fade-in-left">
-        <div className="aspect-video mb-4 rounded-lg overflow-hidden relative group bg-slate-100">
-          {embedUrl ? (
-            <iframe
-              src={embedUrl}
-              title={video.name}
-              className="w-full h-full"
-              frameBorder="0"
-              allow="autoplay; encrypted-media; fullscreen; picture-in-picture; screen-wake-lock;"
-              allowFullScreen
-            ></iframe>
-          ) : (
-            <div className="w-full h-full flex items-center justify-center bg-slate-200">
-              <div className="text-center text-slate-500">
-                <Play className="w-12 h-12 mx-auto mb-2" />
-                <p className="font-poiret">Видео недоступно</p>
-              </div>
-            </div>
-          )}
-          
-          {/* Platform badge */}
-          <div className="absolute top-4 right-4 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
-            <div className="bg-black/50 backdrop-blur-sm text-white px-3 py-1 rounded-full text-xs font-poiret flex items-center space-x-1">
-              <ExternalLink className="w-3 h-3" />
-              <span>{video.platform}</span>
-            </div>
-          </div>
-        </div>
-        
-        <h3 className="text-xl font-poiret font-bold text-slate-800 mb-2">
-          {video.name}
-        </h3>
-        {video.caption && (
-          <p className="text-slate-600 font-poiret mb-4">{video.caption}</p>
-        )}
-        
-        {/* Direct link to original video */}
-        <div className="mt-4">
-          <a
-            href={video.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center space-x-2 text-blue-600 hover:text-blue-800 transition-colors font-poiret text-sm"
-          >
-            <ExternalLink className="w-4 h-4" />
-            <span>Смотреть на {video.platform}</span>
-          </a>
-        </div>
-      </GlassCard>
-    );
-  };
+    return () => {
+      if (loadingTimeoutRef.current) {
+        clearTimeout(loadingTimeoutRef.current);
+      }
+    };
+  }, [initializeVideos]);
 
-  // Рендер для локального видео (storage или embedded)
-  const renderLocalVideo = (video: Video) => {
-    return (
-      <GlassCard key={video.id} className="p-4 animate-fade-in-left">
-        <div className="relative group">
-          {/* Video Container */}
-          <div className={`relative rounded-lg overflow-hidden bg-black ${
-            video.isVertical ? 'aspect-[9/16]' : 'aspect-video'
-          }`}>
-            <video
-              ref={(el) => {
-                if (el) videoRefs.current[video.id] = el;
-              }}
-              src={video.url}
-              className="w-full h-full object-contain cursor-pointer"
-              onLoadedMetadata={() => {
-                console.log(`Video metadata loaded for ${video.id}:`, video.url);
-                handleLoadedMetadata(video.id);
-              }}
-              onTimeUpdate={() => handleTimeUpdate(video.id)}
-              onEnded={() => handleVideoEnd(video.id)}
-              onClick={() => togglePlay(video.id)}
-              onError={(e) => {
-                console.error(`Video error for ${video.id}:`, e);
-                console.error('Video URL:', video.url);
-                const target = e.target as HTMLVideoElement;
-                console.error('Video error details:', {
-                  error: target.error,
-                  networkState: target.networkState,
-                  readyState: target.readyState
-                });
-              }}
-              onLoadStart={() => console.log(`Video load start for ${video.id}`)}
-              onCanPlay={() => console.log(`Video can play for ${video.id}`)}
-              muted={isMuted[video.id] || false}
-              preload="metadata"
-              crossOrigin="anonymous"
-            />
-
-            {/* Play/Pause Overlay */}
-            <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-300 bg-black/20">
-              <button
-                onClick={() => togglePlay(video.id)}
-                className="w-16 h-16 bg-white/90 backdrop-blur-sm rounded-full flex items-center justify-center hover:bg-white transition-all duration-200 hover:scale-110"
-              >
-                {isPlaying[video.id] ? (
-                  <Pause className="w-8 h-8 text-slate-700" />
-                ) : (
-                  <Play className="w-8 h-8 text-slate-700 ml-1" />
-                )}
-              </button>
-            </div>
-
-            {/* Video Type Badge */}
-            <div className="absolute top-4 left-4 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
-              <div className={`px-3 py-1 rounded-full text-xs font-poiret flex items-center space-x-1 ${
-                video.type === 'storage' 
-                  ? 'bg-green-500/80 text-white' 
-                  : 'bg-blue-500/80 text-white'
-              }`}>
-                <span>
-                  {video.type === 'storage' ? 'Загружено' : 'Встроено'}
-                </span>
-              </div>
-            </div>
-
-            {/* Controls */}
-            <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/60 to-transparent p-4 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
-              {/* Progress Bar */}
-              {duration[video.id] && (
-                <div className="mb-3">
-                  <input
-                    type="range"
-                    min="0"
-                    max={duration[video.id] || 0}
-                    value={currentTime[video.id] || 0}
-                    onChange={(e) => handleSeek(video.id, parseFloat(e.target.value))}
-                    className="w-full h-1 bg-white/30 rounded-lg appearance-none cursor-pointer"
-                    style={{
-                      background: `linear-gradient(to right, #f257cf 0%, #f257cf ${
-                        ((currentTime[video.id] || 0) / (duration[video.id] || 1)) * 100
-                      }%, rgba(255,255,255,0.3) ${
-                        ((currentTime[video.id] || 0) / (duration[video.id] || 1)) * 100
-                      }%, rgba(255,255,255,0.3) 100%)`
-                    }}
-                  />
-                </div>
-              )}
-
-              {/* Control Buttons */}
-              <div className="flex items-center justify-between text-white">
-                <div className="flex items-center space-x-2">
-                  <button
-                    onClick={() => togglePlay(video.id)}
-                    className="p-1 hover:bg-white/20 rounded"
-                  >
-                    {isPlaying[video.id] ? (
-                      <Pause className="w-4 h-4" />
-                    ) : (
-                      <Play className="w-4 h-4" />
-                    )}
-                  </button>
-                  
-                  <button
-                    onClick={() => toggleMute(video.id)}
-                    className="p-1 hover:bg-white/20 rounded"
-                  >
-                    {isMuted[video.id] ? (
-                      <VolumeX className="w-4 h-4" />
-                    ) : (
-                      <Volume2 className="w-4 h-4" />
-                    )}
-                  </button>
-
-                  {duration[video.id] && (
-                    <span className="text-xs">
-                      {formatTime(currentTime[video.id] || 0)} / {formatTime(duration[video.id])}
-                    </span>
-                  )}
-                </div>
-
-                <div className="flex items-center space-x-2">
-                  {video.type === 'storage' && (
-                    <a
-                      href={video.url}
-                      download
-                      className="p-1 hover:bg-white/20 rounded"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <Download className="w-4 h-4" />
-                    </a>
-                  )}
-                  
-                  <button
-                    onClick={() => handleFullscreen(video.id)}
-                    className="p-1 hover:bg-white/20 rounded"
-                  >
-                    <Maximize className="w-4 h-4" />
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Video Title */}
-          <div className="mt-3">
-            <h3 className="text-lg font-poiret font-bold text-slate-800 truncate">
-              {video.name}
-            </h3>
-            
-            <div className="flex items-center space-x-2 mt-1">
-              {video.isVertical && (
-                <span className="inline-block px-2 py-1 bg-purple-100 text-purple-700 text-xs rounded-full font-poiret">
-                  Вертикальное
-                </span>
-              )}
-              
-              <span className={`inline-block px-2 py-1 text-xs rounded-full font-poiret ${
-                video.type === 'storage' 
-                  ? 'bg-green-100 text-green-700' 
-                  : 'bg-blue-100 text-blue-700'
-              }`}>
-                {video.type === 'storage' ? 'Из галереи' : 'Встроенное'}
-              </span>
-            </div>
-
-            {video.caption && (
-              <p className="text-slate-600 font-poiret mt-2 text-sm">{video.caption}</p>
-            )}
-          </div>
-        </div>
-      </GlassCard>
-    );
-  };
+  // Update play order when videos change
+  useEffect(() => {
+    if (videos.length > 0) {
+      const order = Array.from({ length: videos.length }, (_, i) => i);
+      setPlayOrder(isShuffled ? shuffleArray(order) : order);
+    }
+  }, [videos.length, isShuffled]);
 
   if (loading) {
     return (
@@ -613,32 +453,7 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
             <div className="aspect-video mb-6 rounded-lg overflow-hidden bg-slate-200 flex items-center justify-center">
               <div className="flex flex-col items-center space-y-4">
                 <div className="w-12 h-12 border-4 border-pink-500 border-t-transparent rounded-full animate-spin"></div>
-                <p className="text-slate-600 font-poiret">Загрузка видео...</p>
-              </div>
-            </div>
-          </GlassCard>
-        </div>
-      </section>
-    );
-  }
-
-  if (error && videos.length === 0) {
-    return (
-      <section className="min-h-screen flex items-center px-4 py-12">
-        <div className="max-w-6xl mx-auto w-full">
-          <div className="text-center mb-12 animate-fade-in-up">
-            <h2 className="text-3xl md:text-4xl font-poiret font-bold text-slate-800 mb-4">
-              Видеопортфолио
-            </h2>
-            <p className="text-slate-600 text-lg font-poiret">Ошибка загрузки видео</p>
-          </div>
-          
-          <GlassCard className="p-8 animate-scale-in">
-            <div className="aspect-video mb-6 rounded-lg overflow-hidden bg-slate-100 flex items-center justify-center">
-              <div className="flex flex-col items-center space-y-4 text-slate-500">
-                <Play className="w-16 h-16" />
-                <p className="font-poiret">Не удалось загрузить видео</p>
-                <p className="text-sm font-poiret">{error}</p>
+                <p className="text-slate-600 font-poiret">Инициализация плеера...</p>
               </div>
             </div>
           </GlassCard>
@@ -671,35 +486,555 @@ export const VideosSection: React.FC<VideosSectionProps> = ({ data }) => {
     );
   }
 
+  const loadedVideos = videos.filter(v => v.loaded);
+  const currentVideo = videos[currentVideoIndex];
+
   return (
     <section className="min-h-screen flex items-center px-4 py-12">
       <div className="max-w-7xl mx-auto w-full">
-        <div className="text-center mb-12 animate-fade-in-up">
+        <div className="text-center mb-8 animate-fade-in-up">
           <h2 className="text-3xl md:text-4xl font-poiret font-bold text-slate-800 mb-4">
             Видеопортфолио
           </h2>
           <p className="text-slate-600 text-lg font-poiret">Работы в эфире</p>
           
-          {/* Statistics */}
-          <div className="flex justify-center space-x-6 mt-4 text-sm text-slate-600 font-poiret">
-            <span>Всего видео: {videos.length}</span>
-            <span>Из галереи: {videos.filter(v => v.type === 'storage').length}</span>
-            <span>Встроенных: {videos.filter(v => v.type === 'embedded').length}</span>
-            <span>Внешних: {videos.filter(v => v.type === 'external').length}</span>
+          {/* Statistics and Controls */}
+          <div className="flex flex-wrap justify-center items-center gap-4 mt-6">
+            <div className="flex space-x-4 text-sm text-slate-600 font-poiret">
+              <span>Загружено: {loadedVideos.length}</span>
+              <span>Всего: {videos.length}</span>
+              {isLoadingMore && <span className="text-blue-600">⏳ Загрузка...</span>}
+            </div>
+            
+            {/* View Mode Toggle */}
+            <div className="flex bg-white/20 backdrop-blur-md border border-white/30 rounded-full p-1">
+              <button
+                onClick={() => setViewMode('grid')}
+                className={`px-3 py-1 rounded-full text-sm font-poiret transition-all ${
+                  viewMode === 'grid' 
+                    ? 'bg-white/40 text-slate-800' 
+                    : 'text-slate-600 hover:text-slate-800'
+                }`}
+              >
+                <Grid className="w-4 h-4" />
+              </button>
+              <button
+                onClick={() => setViewMode('playlist')}
+                className={`px-3 py-1 rounded-full text-sm font-poiret transition-all ${
+                  viewMode === 'playlist' 
+                    ? 'bg-white/40 text-slate-800' 
+                    : 'text-slate-600 hover:text-slate-800'
+                }`}
+              >
+                <List className="w-4 h-4" />
+              </button>
+            </div>
           </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {videos.map((video) => {
-            // Для внешних видео используем iframe
-            if (video.type === 'external') {
-              return renderExternalVideo(video);
-            }
+        {viewMode === 'playlist' ? (
+          /* Playlist Mode */
+          <div className="grid lg:grid-cols-3 gap-8">
+            {/* Main Player */}
+            <div className="lg:col-span-2">
+              <GlassCard className="p-6 animate-fade-in-up">
+                {currentVideo && currentVideo.loaded ? (
+                  <div className="relative group">
+                    {currentVideo.type === 'external' ? (
+                      /* External Video */
+                      <div className="aspect-video rounded-lg overflow-hidden">
+                        <iframe
+                          src={convertVKVideoUrl(currentVideo.url)}
+                          title={currentVideo.name}
+                          className="w-full h-full"
+                          frameBorder="0"
+                          allow="autoplay; encrypted-media; fullscreen; picture-in-picture; screen-wake-lock;"
+                          allowFullScreen
+                        ></iframe>
+                      </div>
+                    ) : (
+                      /* Local Video */
+                      <div className="aspect-video rounded-lg overflow-hidden bg-black relative">
+                        <video
+                          ref={(el) => {
+                            if (el) videoRefs.current[currentVideo.id] = el;
+                          }}
+                          src={currentVideo.url}
+                          className="w-full h-full object-contain"
+                          onTimeUpdate={handleTimeUpdate}
+                          onEnded={handleVideoEnd}
+                          onLoadedMetadata={handleTimeUpdate}
+                          muted={isMuted}
+                        />
+                        
+                        {/* Overlay Controls */}
+                        <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-300 bg-black/20">
+                          <button
+                            onClick={togglePlayPause}
+                            className="w-16 h-16 bg-white/90 backdrop-blur-sm rounded-full flex items-center justify-center hover:bg-white transition-all duration-200 hover:scale-110"
+                          >
+                            {isPlaying ? (
+                              <Pause className="w-8 h-8 text-slate-700" />
+                            ) : (
+                              <Play className="w-8 h-8 text-slate-700 ml-1" />
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                    
+                    {/* Video Info */}
+                    <div className="mt-4">
+                      <h3 className="text-xl font-poiret font-bold text-slate-800 mb-2">
+                        {currentVideo.name}
+                      </h3>
+                      {currentVideo.caption && (
+                        <p className="text-slate-600 font-poiret">{currentVideo.caption}</p>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="aspect-video rounded-lg bg-slate-100 flex items-center justify-center">
+                    <div className="text-center text-slate-500">
+                      <Play className="w-12 h-12 mx-auto mb-2" />
+                      <p className="font-poiret">Выберите видео для воспроизведения</p>
+                    </div>
+                  </div>
+                )}
+                
+                {/* Playlist Controls */}
+                {currentVideo && currentVideo.type !== 'external' && (
+                  <div className="mt-6 space-y-4">
+                    {/* Progress Bar */}
+                    {duration > 0 && (
+                      <div className="space-y-2">
+                        <input
+                          type="range"
+                          min="0"
+                          max={duration}
+                          value={currentTime}
+                          onChange={(e) => handleSeek(parseFloat(e.target.value))}
+                          className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer"
+                          style={{
+                            background: `linear-gradient(to right, #f257cf 0%, #f257cf ${
+                              (currentTime / duration) * 100
+                            }%, #e2e8f0 ${(currentTime / duration) * 100}%, #e2e8f0 100%)`
+                          }}
+                        />
+                        <div className="flex justify-between text-sm text-slate-600 font-poiret">
+                          <span>{formatTime(currentTime)}</span>
+                          <span>{formatTime(duration)}</span>
+                        </div>
+                      </div>
+                    )}
+                    
+                    {/* Control Buttons */}
+                    <div className="flex items-center justify-center space-x-4">
+                      <button
+                        onClick={toggleShuffle}
+                        className={`p-2 rounded-full transition-all ${
+                          isShuffled 
+                            ? 'bg-purple-500 text-white' 
+                            : 'bg-white/20 text-slate-600 hover:bg-white/30'
+                        }`}
+                      >
+                        <Shuffle className="w-4 h-4" />
+                      </button>
+                      
+                      <button
+                        onClick={playPrevious}
+                        className="p-2 bg-white/20 hover:bg-white/30 rounded-full transition-all"
+                      >
+                        <SkipBack className="w-4 h-4 text-slate-600" />
+                      </button>
+                      
+                      <button
+                        onClick={togglePlayPause}
+                        className="p-3 bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 rounded-full transition-all hover:scale-105"
+                      >
+                        {isPlaying ? (
+                          <Pause className="w-5 h-5 text-white" />
+                        ) : (
+                          <Play className="w-5 h-5 text-white ml-0.5" />
+                        )}
+                      </button>
+                      
+                      <button
+                        onClick={playNext}
+                        className="p-2 bg-white/20 hover:bg-white/30 rounded-full transition-all"
+                      >
+                        <SkipForward className="w-4 h-4 text-slate-600" />
+                      </button>
+                      
+                      <button
+                        onClick={toggleRepeat}
+                        className={`p-2 rounded-full transition-all ${
+                          repeatMode !== 'none' 
+                            ? 'bg-purple-500 text-white' 
+                            : 'bg-white/20 text-slate-600 hover:bg-white/30'
+                        }`}
+                      >
+                        <Repeat className="w-4 h-4" />
+                        {repeatMode === 'one' && (
+                          <span className="absolute -top-1 -right-1 w-3 h-3 bg-yellow-500 rounded-full text-xs flex items-center justify-center text-white">1</span>
+                        )}
+                      </button>
+                    </div>
+                    
+                    {/* Autoplay Toggle */}
+                    <div className="flex items-center justify-center">
+                      <label className="flex items-center space-x-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={autoplay}
+                          onChange={(e) => setAutoplay(e.target.checked)}
+                          className="sr-only"
+                        />
+                        <div className={`w-10 h-6 rounded-full transition-all ${
+                          autoplay ? 'bg-purple-500' : 'bg-slate-300'
+                        }`}>
+                          <div className={`w-4 h-4 bg-white rounded-full shadow transform transition-transform ${
+                            autoplay ? 'translate-x-5' : 'translate-x-1'
+                          } mt-1`} />
+                        </div>
+                        <span className="text-sm font-poiret text-slate-600">Автовоспроизведение</span>
+                      </label>
+                    </div>
+                  </div>
+                )}
+              </GlassCard>
+            </div>
             
-            // Для локальных видео используем HTML5 плеер
-            return renderLocalVideo(video);
-          })}
-        </div>
+            {/* Playlist */}
+            <div className="lg:col-span-1">
+              <GlassCard className="p-4 animate-fade-in-right">
+                <h3 className="font-poiret font-bold text-slate-800 mb-4 flex items-center">
+                  <List className="w-4 h-4 mr-2" />
+                  Плейлист ({loadedVideos.length})
+                </h3>
+                
+                <div className="space-y-2 max-h-96 overflow-y-auto">
+                  {playOrder.map((videoIndex, orderIndex) => {
+                    const video = videos[videoIndex];
+                    if (!video || !video.loaded) return null;
+                    
+                    const isActive = videoIndex === currentVideoIndex;
+                    
+                    return (
+                      <button
+                        key={video.id}
+                        onClick={() => playVideo(videoIndex)}
+                        className={`w-full text-left p-3 rounded-lg transition-all ${
+                          isActive 
+                            ? 'bg-purple-500/20 border border-purple-500/30' 
+                            : 'bg-white/10 hover:bg-white/20'
+                        }`}
+                      >
+                        <div className="flex items-center space-x-3">
+                          <div className="flex-shrink-0">
+                            {isActive && isPlaying ? (
+                              <Pause className="w-4 h-4 text-purple-600" />
+                            ) : (
+                              <Play className="w-4 h-4 text-slate-600" />
+                            )}
+                          </div>
+                          
+                          <div className="flex-1 min-w-0">
+                            <p className={`font-poiret font-medium truncate ${
+                              isActive ? 'text-purple-800' : 'text-slate-800'
+                            }`}>
+                              {orderIndex + 1}. {video.name}
+                            </p>
+                            
+                            <div className="flex items-center space-x-2 mt-1">
+                              <span className={`inline-block px-2 py-0.5 text-xs rounded-full font-poiret ${
+                                video.type === 'storage' 
+                                  ? 'bg-green-100 text-green-700' 
+                                  : video.type === 'external'
+                                  ? 'bg-blue-100 text-blue-700'
+                                  : 'bg-purple-100 text-purple-700'
+                              }`}>
+                                {video.type === 'storage' ? 'Галерея' : 
+                                 video.type === 'external' ? video.platform : 'Встроено'}
+                              </span>
+                              
+                              {video.isVertical && (
+                                <span className="inline-block px-2 py-0.5 bg-orange-100 text-orange-700 text-xs rounded-full font-poiret">
+                                  Вертикальное
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                  
+                  {/* Loading indicator for lazy loading */}
+                  {isLoadingMore && (
+                    <div className="p-3 text-center">
+                      <div className="flex items-center justify-center space-x-2">
+                        <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+                        <span className="text-sm font-poiret text-slate-600">Загрузка видео...</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </GlassCard>
+            </div>
+          </div>
+        ) : (
+          /* Grid Mode */
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {videos.map((video, index) => {
+              if (!video.loaded && !video.loading) {
+                return (
+                  <GlassCard key={video.id} className="p-4 animate-fade-in-left">
+                    <div className="aspect-video rounded-lg bg-slate-100 flex items-center justify-center">
+                      <div className="text-center text-slate-400">
+                        <div className="w-8 h-8 border-2 border-slate-300 border-t-transparent rounded-full animate-spin mx-auto mb-2"></div>
+                        <p className="text-sm font-poiret">Ожидание загрузки...</p>
+                      </div>
+                    </div>
+                    <div className="mt-3">
+                      <h3 className="font-poiret font-bold text-slate-600 truncate">{video.name}</h3>
+                    </div>
+                  </GlassCard>
+                );
+              }
+              
+              if (video.loading) {
+                return (
+                  <GlassCard key={video.id} className="p-4 animate-fade-in-left">
+                    <div className="aspect-video rounded-lg bg-slate-100 flex items-center justify-center">
+                      <div className="text-center text-slate-500">
+                        <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-2"></div>
+                        <p className="text-sm font-poiret">Проверка видео...</p>
+                      </div>
+                    </div>
+                    <div className="mt-3">
+                      <h3 className="font-poiret font-bold text-slate-700 truncate">{video.name}</h3>
+                    </div>
+                  </GlassCard>
+                );
+              }
+              
+              if (!video.loaded) return null;
+              
+              // External videos (VK, YouTube, etc.)
+              if (video.type === 'external') {
+                const embedUrl = convertVKVideoUrl(video.url);
+                
+                return (
+                  <GlassCard key={video.id} className="p-4 animate-fade-in-left">
+                    <div className="aspect-video mb-4 rounded-lg overflow-hidden relative group bg-slate-100">
+                      {embedUrl ? (
+                        <iframe
+                          src={embedUrl}
+                          title={video.name}
+                          className="w-full h-full"
+                          frameBorder="0"
+                          allow="autoplay; encrypted-media; fullscreen; picture-in-picture; screen-wake-lock;"
+                          allowFullScreen
+                        ></iframe>
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center bg-slate-200">
+                          <div className="text-center text-slate-500">
+                            <Play className="w-12 h-12 mx-auto mb-2" />
+                            <p className="font-poiret">Видео недоступно</p>
+                          </div>
+                        </div>
+                      )}
+                      
+                      {/* Platform badge */}
+                      <div className="absolute top-4 right-4 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+                        <div className="bg-black/50 backdrop-blur-sm text-white px-3 py-1 rounded-full text-xs font-poiret flex items-center space-x-1">
+                          <ExternalLink className="w-3 h-3" />
+                          <span>{video.platform}</span>
+                        </div>
+                      </div>
+                      
+                      {/* Playlist add button */}
+                      <div className="absolute top-4 left-4 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+                        <button
+                          onClick={() => {
+                            setCurrentVideoIndex(index);
+                            setViewMode('playlist');
+                          }}
+                          className="bg-white/90 backdrop-blur-sm text-slate-700 px-3 py-1 rounded-full text-xs font-poiret hover:bg-white transition-all"
+                        >
+                          В плейлист
+                        </button>
+                      </div>
+                    </div>
+                    
+                    <div className="space-y-2">
+                      <h3 className="text-lg font-poiret font-bold text-slate-800 truncate">
+                        {video.name}
+                      </h3>
+                      
+                      <div className="flex flex-wrap gap-2">
+                        <span className="inline-block px-2 py-1 bg-blue-100 text-blue-700 text-xs rounded-full font-poiret">
+                          {video.platform}
+                        </span>
+                      </div>
+                      
+                      {video.caption && (
+                        <p className="text-slate-600 font-poiret text-sm line-clamp-2">{video.caption}</p>
+                      )}
+                      
+                      <a
+                        href={video.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center space-x-1 text-blue-600 hover:text-blue-800 transition-colors font-poiret text-sm"
+                      >
+                        <ExternalLink className="w-3 h-3" />
+                        <span>Смотреть на {video.platform}</span>
+                      </a>
+                    </div>
+                  </GlassCard>
+                );
+              }
+              
+              // Local videos (storage/embedded)
+              return (
+                <GlassCard key={video.id} className="p-4 animate-fade-in-left">
+                  <div className="relative group">
+                    <div className={`relative rounded-lg overflow-hidden bg-black ${
+                      video.isVertical ? 'aspect-[9/16]' : 'aspect-video'
+                    }`}>
+                      <video
+                        ref={(el) => {
+                          if (el) videoRefs.current[video.id] = el;
+                        }}
+                        src={video.url}
+                        className="w-full h-full object-contain cursor-pointer"
+                        onLoadedMetadata={() => {
+                          const videoEl = videoRefs.current[video.id];
+                          if (videoEl) {
+                            const isVertical = videoEl.videoHeight > videoEl.videoWidth;
+                            setVideos(prev => prev.map(v => 
+                              v.id === video.id ? { ...v, isVertical } : v
+                            ));
+                          }
+                        }}
+                        onClick={() => {
+                          setCurrentVideoIndex(index);
+                          setViewMode('playlist');
+                          playVideo(index);
+                        }}
+                        onError={(e) => {
+                          console.error(`Video error for ${video.id}:`, e);
+                        }}
+                        muted
+                        preload="metadata"
+                        crossOrigin="anonymous"
+                      />
+
+                      {/* Play overlay */}
+                      <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-300 bg-black/20">
+                        <div className="bg-white/90 backdrop-blur-sm rounded-full p-4 hover:bg-white transition-all duration-200 hover:scale-110">
+                          <Play className="w-8 h-8 text-slate-700 ml-1" />
+                        </div>
+                      </div>
+
+                      {/* Video type badge */}
+                      <div className="absolute top-4 left-4 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+                        <div className={`px-3 py-1 rounded-full text-xs font-poiret ${
+                          video.type === 'storage' 
+                            ? 'bg-green-500/80 text-white' 
+                            : 'bg-purple-500/80 text-white'
+                        }`}>
+                          {video.type === 'storage' ? 'Галерея' : 'Встроено'}
+                        </div>
+                      </div>
+
+                      {/* Playlist add button */}
+                      <div className="absolute top-4 right-4 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setCurrentVideoIndex(index);
+                            setViewMode('playlist');
+                          }}
+                          className="bg-white/90 backdrop-blur-sm text-slate-700 px-3 py-1 rounded-full text-xs font-poiret hover:bg-white transition-all"
+                        >
+                          В плейлист
+                        </button>
+                      </div>
+
+                      {/* Quick action buttons */}
+                      <div className="absolute bottom-4 right-4 opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex space-x-2">
+                        {video.type === 'storage' && (
+                          <a
+                            href={video.url}
+                            download
+                            className="p-2 bg-white/90 backdrop-blur-sm rounded-full hover:bg-white transition-all"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <Download className="w-4 h-4 text-slate-700" />
+                          </a>
+                        )}
+                        
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const videoEl = videoRefs.current[video.id];
+                            if (videoEl && videoEl.requestFullscreen) {
+                              videoEl.requestFullscreen();
+                            }
+                          }}
+                          className="p-2 bg-white/90 backdrop-blur-sm rounded-full hover:bg-white transition-all"
+                        >
+                          <Maximize className="w-4 h-4 text-slate-700" />
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="mt-3 space-y-2">
+                      <h3 className="text-lg font-poiret font-bold text-slate-800 truncate">
+                        {video.name}
+                      </h3>
+                      
+                      <div className="flex flex-wrap gap-2">
+                        {video.isVertical && (
+                          <span className="inline-block px-2 py-1 bg-orange-100 text-orange-700 text-xs rounded-full font-poiret">
+                            Вертикальное
+                          </span>
+                        )}
+                        
+                        <span className={`inline-block px-2 py-1 text-xs rounded-full font-poiret ${
+                          video.type === 'storage' 
+                            ? 'bg-green-100 text-green-700' 
+                            : 'bg-purple-100 text-purple-700'
+                        }`}>
+                          {video.type === 'storage' ? 'Из галереи' : 'Встроенное'}
+                        </span>
+                      </div>
+
+                      {video.caption && (
+                        <p className="text-slate-600 font-poiret text-sm line-clamp-2">{video.caption}</p>
+                      )}
+                    </div>
+                  </div>
+                </GlassCard>
+              );
+            })}
+          </div>
+        )}
+        
+        {/* Loading Progress at bottom */}
+        {isLoadingMore && (
+          <div className="mt-8 text-center">
+            <div className="inline-flex items-center space-x-3 bg-white/20 backdrop-blur-md border border-white/30 rounded-full px-6 py-3">
+              <div className="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+              <span className="font-poiret text-slate-700">
+                Загружаем видео из галереи... ({loadedCount}/{videos.filter(v => v.type === 'storage').length})
+              </span>
+            </div>
+          </div>
+        )}
       </div>
     </section>
   );
