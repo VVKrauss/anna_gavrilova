@@ -3,25 +3,11 @@ import react from '@vitejs/plugin-react';
 import { copyFileSync, existsSync } from 'fs';
 import { resolve } from 'path';
 
-// Plugin для копирования файлов
-const copyFilesPlugin = () => {
+// Plugin для копирования .htaccess
+const copyHtaccessPlugin = () => {
   return {
-    name: 'copy-files',
+    name: 'copy-htaccess',
     writeBundle() {
-      // Копируем _redirects для SPA
-      const redirectsPath = resolve('public', '_redirects');
-      const distRedirectsPath = resolve('dist', '_redirects');
-      
-      if (existsSync(redirectsPath)) {
-        try {
-          copyFileSync(redirectsPath, distRedirectsPath);
-          console.log('✅ _redirects copied to dist/');
-        } catch (error) {
-          console.warn('⚠️ Failed to copy _redirects:', error.message);
-        }
-      }
-
-      // Копируем .htaccess если есть
       const htaccessPath = resolve('.htaccess');
       const distHtaccessPath = resolve('dist', '.htaccess');
       
@@ -32,6 +18,8 @@ const copyFilesPlugin = () => {
         } catch (error) {
           console.warn('⚠️ Failed to copy .htaccess:', error.message);
         }
+      } else {
+        console.warn('⚠️ .htaccess not found in project root');
       }
     }
   };
@@ -41,7 +29,7 @@ const copyFilesPlugin = () => {
 export default defineConfig({
   plugins: [
     react(),
-    copyFilesPlugin()
+    copyHtaccessPlugin()
   ],
   root: '.',
   base: '/', // Важно для правильных путей
