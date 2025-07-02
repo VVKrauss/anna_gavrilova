@@ -1,0 +1,80 @@
+# timeweb-app.yml - конфигурация для Timeweb Cloud App
+# Поместите этот файл в корень репозитория
+
+# Основные настройки приложения
+app:
+  name: "anna-gavrilova-portfolio"
+  type: "frontend"
+  runtime: "nodejs"
+  version: "18"
+
+# Настройки сборки
+build:
+  # Команды установки зависимостей
+  install_command: "npm ci"
+  
+  # Команда сборки
+  build_command: "npm run build"
+  
+  # Папка с собранным приложением
+  output_directory: "dist"
+  
+  # Переменные окружения для сборки
+  environment:
+    NODE_ENV: "production"
+    # Добавьте ваши Supabase переменные здесь:
+    # VITE_SUPABASE_URL: "your_supabase_url"
+    # VITE_SUPABASE_ANON_KEY: "your_supabase_anon_key"
+
+# Настройки среды выполнения
+runtime:
+  # Версия Node.js
+  node_version: "18"
+  
+  # Дополнительные пакеты (если нужны)
+  # packages:
+  #   - "imagemagick"
+
+# Настройки веб-сервера
+web:
+  # Для SPA приложений нужен правильный роутинг
+  spa: true
+  
+  # Настройки кэширования
+  headers:
+    "*.css":
+      Cache-Control: "public, max-age=31536000, immutable"
+    "*.js":
+      Cache-Control: "public, max-age=31536000, immutable"
+    "*.png,*.jpg,*.jpeg,*.gif,*.svg,*.webp":
+      Cache-Control: "public, max-age=31536000, immutable"
+    "*.woff,*.woff2":
+      Cache-Control: "public, max-age=31536000, immutable"
+    "/":
+      Cache-Control: "no-cache"
+    "/index.html":
+      Cache-Control: "no-cache"
+
+# Настройки домена (опционально)
+# domain:
+#   - "annagavrilova.ru"
+#   - "www.annagavrilova.ru"
+
+# Настройки SSL (автоматически включается)
+ssl:
+  enabled: true
+  force_https: true
+
+# Настройки мониторинга
+monitoring:
+  enabled: true
+  
+# Лимиты ресурсов (по умолчанию достаточно для статического сайта)
+resources:
+  memory: "512MB"
+  cpu: "0.5"
+
+# Переменные окружения (задаются в интерфейсе Timeweb)
+# Не включайте чувствительные данные в этот файл!
+# environment:
+#   NODE_ENV: "production"
