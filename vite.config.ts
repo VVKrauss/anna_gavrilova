@@ -6,12 +6,13 @@ import { resolve } from 'path';
 export default defineConfig({
   plugins: [
     react({
-      // Оптимизация для продакшена
+      // Базовая конфигурация React
+      include: "**/*.{jsx,tsx}",
+      // Отключаем babel плагины, которые могут вызывать проблемы
       babel: {
-        plugins: [
-          // Удаляем PropTypes в продакшене
-          'babel-plugin-transform-remove-console'
-        ]
+        // Оставляем базовую конфигурацию без дополнительных плагинов
+        babelrc: false,
+        configFile: false
       }
     })
   ],
