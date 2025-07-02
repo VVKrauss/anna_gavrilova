@@ -1,0 +1,36 @@
+# .timeweb.yml - конфигурация для автодеплоя Timeweb
+# Разместите этот файл в корне репозитория
+
+version: '1'
+
+# Настройки сборки
+build:
+  # Команды для установки зависимостей
+  install:
+    - npm ci
+  
+  # Команды для сборки проекта
+  build:
+    - npm run build
+  
+  # Папка с результатом сборки
+  output_dir: dist
+  
+  # Переменные окружения (если поддерживаются)
+  environment:
+    NODE_ENV: production
+
+# Настройки развертывания
+deploy:
+  # Целевая папка на сервере (обычно public_html)
+  target_dir: public_html
+  
+  # Очистка папки перед развертыванием
+  clean_target: true
+  
+  # Файлы для исключения
+  exclude:
+    - "*.map"
+    - "node_modules"
+    - ".git"
+    - ".env*"
