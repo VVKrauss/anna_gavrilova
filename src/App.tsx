@@ -16,14 +16,25 @@ function App() {
   const sectionRefs = useRef([]);
   const isScrollingRef = useRef(false);
   
-  const sections = [
+  // Определяем секции динамически на основе доступных данных
+  const allSections = [
     { key: 'about', component: AboutSection, data: data.about, title: 'Обо мне' },
     { key: 'skills', component: SkillsSection, data: data.skills, title: 'Навыки' },
     { key: 'photos', component: PhotosSection, data: data.photos, title: 'Фотогалерея' },
     { key: 'videos', component: VideosSection, data: data.videos, title: 'Видеопортфолио' },
     // { key: 'audio', component: AudioSection, data: data.audio, title: 'Аудио' },
     { key: 'contacts', component: ContactsSection, data: data.contacts, title: 'Контакты' },
-  ].filter(section => section.data); // Only show sections with data
+  ];
+
+  // Показываем только секции с данными, но about и contacts всегда показываем
+  const sections = allSections.filter(section => {
+    if (section.key === 'about' || section.key === 'contacts' || section.key === 'skills') {
+      return section.data; // Обязательные секции
+    }
+    return section.data && (
+      Array.isArray(section.data) ? section.data.length > 0 : section.data
+    );
+  });
 
   const sectionTitles = sections.map(section => section.title);
 
@@ -31,12 +42,12 @@ function App() {
   useEffect(() => {
     const observerOptions = {
       root: null,
-      rootMargin: '-20% 0px -20% 0px', // Секция считается активной когда занимает 60% экрана
+      rootMargin: '-20% 0px -20% 0px',
       threshold: 0.6
     };
 
     const observer = new IntersectionObserver((entries) => {
-      if (isScrollingRef.current) return; // Игнорируем во время программного скролла
+      if (isScrollingRef.current) return;
 
       entries.forEach((entry) => {
         if (entry.isIntersecting) {
@@ -48,7 +59,6 @@ function App() {
       });
     }, observerOptions);
 
-    // Наблюдаем за всеми секциями
     sectionRefs.current.forEach((ref) => {
       if (ref) observer.observe(ref);
     });
@@ -58,7 +68,6 @@ function App() {
     };
   }, [sections.length]);
 
-  // Плавный скролл к секции
   const scrollToSection = (sectionIndex) => {
     const targetSection = sectionRefs.current[sectionIndex];
     if (targetSection) {
@@ -69,7 +78,6 @@ function App() {
         block: 'start'
       });
 
-      // Сбрасываем флаг после завершения анимации
       setTimeout(() => {
         isScrollingRef.current = false;
         setCurrentSection(sectionIndex);
@@ -77,7 +85,6 @@ function App() {
     }
   };
 
-  // Обработка скролла колесиком мыши для пошагового перехода
   useEffect(() => {
     let scrollTimeout;
     
@@ -87,10 +94,8 @@ function App() {
         return;
       }
 
-      // Очищаем предыдущий таймаут
       clearTimeout(scrollTimeout);
       
-      // Устанавливаем новый таймаут для определения окончания скролла
       scrollTimeout = setTimeout(() => {
         const direction = e.deltaY > 0 ? 1 : -1;
         const nextSection = Math.max(0, Math.min(currentSection + direction, sections.length - 1));
@@ -98,10 +103,9 @@ function App() {
         if (nextSection !== currentSection) {
           scrollToSection(nextSection);
         }
-      }, 50); // Небольшая задержка для группировки событий скролла
+      }, 50);
     };
 
-    // Добавляем пассивный слушатель
     const container = containerRef.current;
     if (container) {
       container.addEventListener('wheel', handleWheel, { passive: false });
@@ -117,17 +121,45 @@ function App() {
     return <LoadingSpinner />;
   }
 
-  if (error) {
+  // Убираем обработку критических ошибок - сайт должен работать в любом случае
+  if (error && (!data.about && !data.contacts)) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-purple-50 flex items-center justify-center">
+        <div className="text-center max-w-lg mx-auto p-8">
+          <h1 className="text-2xl font-poiret font-bold text-slate-800 mb-4">
+            Добро пожаловать!
+          </h1>
+          <p className="text-slate-600 mb-4 font-poiret">
+            Сайт временно работает в автономном режиме. 
+            Основная информация доступна ниже.
+          </p>
+          <div className="bg-white/20 backdrop-blur-md border border-white/30 rounded-2xl p-6 text-left">
+            <h2 className="font-poiret font-bold text-lg mb-2">Анна Гаврилова</h2>
+            <p className="text-slate-700 font-poiret">
+              Телеведущая канала 78, лауреат ТЭФИ-Мультимедиа
+            </p>
+            <div className="mt-4 pt-4 border-t border-white/30">
+              <p className="text-sm text-slate-600 font-poiret">
+                Email: kirido@mail.ru
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Если нет секций для отображения, показываем минимальную версию
+  if (sections.length === 0) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-purple-50 flex items-center justify-center">
         <div className="text-center">
-          <h1 className="text-2xl font-poiret font-bold text-red-600 mb-4">
-            Ошибка загрузки
+          <h1 className="text-3xl font-poiret font-bold text-slate-800 mb-4">
+            Анна Гаврилова
           </h1>
-          <p className="text-slate-600">
-            Пожалуйста, убедитесь, что Supabase настроен правильно.
+          <p className="text-slate-600 font-poiret text-lg">
+            Портфолио загружается...
           </p>
-          <p className="text-sm text-slate-500 mt-2">{error}</p>
         </div>
       </div>
     );
@@ -174,6 +206,13 @@ function App() {
           </div>
         );
       })}
+
+      {/* Небольшое уведомление о статическом режиме (только для разработки) */}
+      {process.env.NODE_ENV === 'development' && error && (
+        <div className="fixed bottom-4 right-4 bg-yellow-100 border border-yellow-300 rounded-lg p-3 text-sm text-yellow-800 max-w-sm">
+          <strong>Режим разработки:</strong> Используются статические данные
+        </div>
+      )}
     </div>
   );
 }
