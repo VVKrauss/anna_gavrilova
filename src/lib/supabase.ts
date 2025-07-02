@@ -2,7 +2,7 @@ import { createClient } from '@supabase/supabase-js';
 
 // Hardcoded конфигурация для быстрого тестирования
 const SUPABASE_URL = 'https://uvcywpcikjcdyzyosvhx.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InV2Y3l3cGNpa2pjZHl6eW9zdmh4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3MTg0NTkyMTUsImV4cCI6MjAzNDAzNTIxNX0.1QvOFHpXXQEjhSnFzz5HKFIlv3z7AiLkr8jM9pzjzaY';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InV2Y3l3cGNpa2pjZHl6eW9zdmh4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDk4NTkxMzMsImV4cCI6MjA2NTQzNTEzM30.CVizF8_hNUGN_HdvcNW_jc9-G22GZkFZQAJxG4QAzF0';
 
 // Используем переменные окружения если доступны, иначе hardcoded значения
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || SUPABASE_URL;
